@@ -45,27 +45,54 @@ async function usacFetch(endpoint, params = {}) {
 async function sync470s() {
   console.log("Syncing Form 470s...");
   try {
-    const data = await usacFetch("8e7p-t23i.json", { funding_year: CURRENT_FY });
-    if (!data.length) { console.log("No 470 data returned"); return; }
-    const rows = data.map(d => ({
-      application_number:    d.application_number    || d.form470_application_number || null,
-      funding_year:          d.funding_year          || CURRENT_FY,
-      billed_entity_name:    d.billed_entity_name    || d.entity_name || null,
-      billed_entity_number:  d.billed_entity_number  || d.ben         || null,
-      state:                 d.billed_entity_state   || d.state        || null,
-      service_category:      d.service_category      || d.category_of_service || null,
-      application_status:    d.application_status    || null,
-      date_posted:           d.date_posted           || null,
-      bid_due_date:          d.auction_end_date      || d.bid_due_date || null,
-      tech_contact_name:     d.contact_name          || d.technical_contact_name || null,
-      tech_contact_email:    d.contact_email         || d.technical_contact_email || null,
-      tech_contact_phone:    d.contact_phone         || d.technical_contact_phone || null,
-      narrative:             d.narrative             || null,
-      raw:                   d,
+    let   page = 1;
+    const pageSize = 1000;
+    let   all  = [];
+    while (true) {
+      const url = `https://opendata.usac.org/api/v3/views/jt8s-3q52/query.json?pageNumber=${page}&pageSize=${pageSize}`;
+      console.log(`USAC 470 fetch page ${page}: ${url}`);
+      const res  = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: `SELECT * WHERE funding_year = '${CURRENT_FY}'`
+        })
+      });
+      const json = await res.json();
+      const data = json.data || (Array.isArray(json) ? json : []);
+      if (!Array.isArray(data) || data.length === 0) break;
+      all = all.concat(data);
+      console.log(`  Page ${page}: ${data.length} records (total: ${all.length})`);
+      if (data.length < pageSize) break;
+      page++;
+    }
+    if (!all.length) { console.log("No 470 data returned"); return; }
+    const rows = all.map(d => ({
+      application_number:   d.application_number   || d.form_470_application_number || null,
+      funding_year:         d.funding_year          || CURRENT_FY,
+      billed_entity_name:   d.billed_entity_name    || d.entity_name || null,
+      billed_entity_number: d.billed_entity_number  || d.ben         || null,
+      state:                d.billed_entity_state   || d.state        || null,
+      service_category:     d.service_category      || d.category_of_service || null,
+      application_status:   d.application_status    || d.form_470_status || null,
+      date_posted:          d.date_certified        || d.date_posted  || null,
+      bid_due_date:         d.bid_due_date          || d.last_date_to_bid || null,
+      tech_contact_name:    d.contact_name          || d.technical_contact_name || null,
+      tech_contact_email:   d.contact_email         || d.technical_contact_email || null,
+      tech_contact_phone:   d.contact_phone         || d.technical_contact_phone || null,
+      consultant_name:      d.consultant_name       || null,
+      consultant_email:     d.consultant_email      || null,
+      narrative:            d.narrative             || null,
+      raw:                  d,
     }));
-    const { error } = await supabase.from("form_470s").upsert(rows, { onConflict: "application_number" });
-    if (error) console.error("470 upsert error:", error.message);
-    else console.log(`Synced ${rows.length} Form 470 records`);
+    // Upsert in batches of 500
+    for (let i = 0; i < rows.length; i += 500) {
+      const batch = rows.slice(i, i + 500);
+      const { error } = await supabase.from("form_470s").upsert(batch, { onConflict: "application_number" });
+      if (error) console.error("470 upsert error:", error.message);
+      else console.log(`  Upserted batch ${Math.floor(i/500)+1} (${batch.length} records)`);
+    }
+    console.log(`Synced ${rows.length} Form 470 records`);
   } catch (err) {
     console.error("sync470s error:", err.message);
   }
@@ -155,7 +182,13 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
-// Manual sync trigger
+// Temporary sync trigger — no auth required for initial data load
+app.get("/api/sync-now", async (req, res) => {
+  res.json({ status: "started", message: "Sync running — check logs in 2-3 minutes" });
+  syncAll();
+});
+
+// Manual sync trigger (requires auth)
 app.post("/api/sync", requireAuth, async (req, res) => {
   res.json({ status: "started", message: "Sync running in background" });
   syncAll();
