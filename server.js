@@ -299,7 +299,7 @@ app.get("/api/stats", requireAuth, async (req, res) => {
       supabase.from("form_471s").select("*", { count: "exact", head: true }),
       supabase.from("commitments").select("*", { count: "exact", head: true }),
     ]);
-    const open470 = await supabase.from("form_470s").select("*", { count: "exact", head: true }).ilike("application_status", "%certif%");
+    const open470 = await supabase.from("form_470s").select("*", { count: "exact", head: true }).gte("bid_due_date", new Date().toISOString());
     res.json({
       status: "success",
       data: {
