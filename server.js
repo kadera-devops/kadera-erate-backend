@@ -538,6 +538,35 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/provider-applicants — applicants for a given SPIN ───────────────
+app.get("/api/provider-applicants", requireAuth, async (req, res) => {
+  try {
+    const { spin_name } = req.query;
+    if (!spin_name) return res.status(400).json({ status:"error", message:"spin_name required" });
+    const { data, error } = await supabase
+      .from("commitments")
+      .select("organization_name, ben, funding_commitment_request, form_471_service_type_name, form_471_frn_status_name, application_number")
+      .ilike("spin_name", `%${spin_name}%`)
+      .order("funding_commitment_request", { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    // Deduplicate by organization_name, summing commitment amounts
+    const orgMap = {};
+    for (const r of data || []) {
+      const key = r.organization_name || "Unknown";
+      if (!orgMap[key]) orgMap[key] = { name: key, ben: r.ben, total: 0, count: 0, service: r.form_471_service_type_name };
+      orgMap[key].total += parseFloat(r.funding_commitment_request) || 0;
+      orgMap[key].count++;
+    }
+    const applicants = Object.values(orgMap)
+      .map(o => ({ ...o, total: Math.round(o.total) }))
+      .sort((a,b) => b.total - a.total);
+    res.json({ status:"success", data: applicants });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/bid-stages — auto-detect stage for tagged 470s ──────────────────
 app.get("/api/bid-stages", requireAuth, async (req, res) => {
   try {
