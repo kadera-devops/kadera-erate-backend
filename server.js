@@ -365,6 +365,26 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/frn-status — FRN status lookup from commitments ─────────────────
+app.get("/api/frn-status", requireAuth, async (req, res) => {
+  try {
+    const { search, search_by = "frn", limit = 50 } = req.query;
+    if (!search) return res.status(400).json({ status:"error", message:"search param required" });
+    let query = supabase.from("commitments").select("funding_request_number,application_number,organization_name,ben,state,form_471_service_type_name,form_471_frn_status_name,funding_commitment_request,dis_pct,fcdl_letter_date,spin_name").limit(Number(limit));
+    if (search_by === "frn")          query = query.ilike("funding_request_number", `%${search}%`);
+    else if (search_by === "application") query = query.ilike("application_number", `%${search}%`);
+    else if (search_by === "organization") query = query.ilike("organization_name", `%${search}%`);
+    else if (search_by === "ben")     query = query.ilike("ben", `%${search}%`);
+    else                              query = query.ilike("organization_name", `%${search}%`);
+    query = query.order("fcdl_letter_date", { ascending: false });
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ status:"success", data: data || [] });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── PATCH /api/tags/:appNumber — update bid status / financials ───────────────
 app.patch("/api/tags/:appNumber", requireAuth, async (req, res) => {
   try {
