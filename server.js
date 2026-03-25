@@ -22,7 +22,9 @@ app.use(express.json());
 const USAC_BASE = "https://opendata.usac.org/resource";
 const CURRENT_FY = "2025";
 
-// ── Helper: fetch all pages from USAC ────────────────────────────────────────
+const USAC_APP_TOKEN = process.env.USAC_APP_TOKEN || "";
+
+// ── Helper: fetch all pages from USAC Socrata API ─────────────────────────────
 async function usacFetch(endpoint, params = {}) {
   const limit  = 1000;
   let   offset = 0;
@@ -31,7 +33,7 @@ async function usacFetch(endpoint, params = {}) {
     const query = new URLSearchParams({ ...params, "$limit": limit, "$offset": offset });
     const url   = `${USAC_BASE}/${endpoint}?${query}`;
     console.log(`USAC fetch: ${url}`);
-    const res  = await fetch(url);
+    const res  = await fetch(url, { headers: { "X-App-Token": USAC_APP_TOKEN } });
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) break;
     all = all.concat(data);
@@ -51,7 +53,7 @@ async function sync470s() {
     while (true) {
       const url = `https://opendata.usac.org/api/v3/views/jt8s-3q52/query.json?pageNumber=${page}&pageSize=${pageSize}`;
       console.log(`USAC 470 fetch page ${page}`);
-      const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-App-Token": USAC_APP_TOKEN }, body: "{}" });
       const text = await res.text();
       console.log(`USAC 470 status: ${res.status}, preview: ${text.substring(0,300)}`);
       let json;
