@@ -255,6 +255,26 @@ app.get("/api/health", (req, res) => {
 });
 
 // Temporary sync trigger — no auth required for initial data load
+// ── TEMP: Line items diagnostic ───────────────────────────────────────────────
+app.get("/api/diag-line-items", async (req, res) => {
+  try {
+    const [countRes, sampleRes, mfrRes] = await Promise.all([
+      supabase.from("frn_line_items").select("*", { count:"exact", head:true }),
+      supabase.from("frn_line_items").select("form_471_manufacturer_name, other_manufacturer_desc, model_of_equipment, form_471_product_name, state").limit(5),
+      supabase.from("frn_line_items").select("form_471_manufacturer_name").not("form_471_manufacturer_name","is",null).limit(5),
+    ]);
+    res.json({
+      total_rows:    countRes.count,
+      sample:        sampleRes.data,
+      with_mfr:      mfrRes.data,
+      count_error:   countRes.error?.message,
+      sample_error:  sampleRes.error?.message,
+    });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 app.get("/api/sync-now", async (req, res) => {
   res.json({ status: "started", message: "Sync running — check logs in 2-3 minutes" });
   syncAll();
