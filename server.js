@@ -45,30 +45,17 @@ async function usacFetch(endpoint, params = {}) {
 
 // ── Sync: Form 470 ───────────────────────────────────────────────────────────
 async function sync470s() {
-  console.log("Syncing Form 470s...");
+  console.log("Syncing Form 470s (TX only)...");
   try {
-    let   page = 1;
-    const pageSize = 1000;
-    let   all  = [];
-    while (true) {
-      const url = `https://opendata.usac.org/api/v3/views/jt8s-3q52/query.json?pageNumber=${page}&pageSize=${pageSize}`;
-      console.log(`USAC 470 fetch page ${page}`);
-      const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-App-Token": USAC_APP_TOKEN }, body: "{}" });
-      const text = await res.text();
-      console.log(`USAC 470 status: ${res.status}, preview: ${text.substring(0,300)}`);
-      let json;
-      try { json = JSON.parse(text); } catch(e) { console.error("JSON parse error:", e.message); break; }
-      const data = Array.isArray(json) ? json : (json.data || json.results || []);
-      if (!Array.isArray(data) || data.length === 0) break;
-      if (page === 1) console.log("Sample record keys:", Object.keys(data[0]).join(", "));
-      all = all.concat(data);
-      console.log(`  Page ${page}: ${data.length} records (total: ${all.length})`);
-      if (data.length < pageSize) break;
-      page++;
-      if (page > 3) { console.log("Stopping at 3 pages for test"); break; }
-    }
-    if (!all.length) { console.log("No 470 data returned"); return; }
-    const rows = all.map(d => ({
+    // Filter to TX only to keep memory usage manageable
+    // Use $where to filter server-side before data is transferred
+    const data = await usacFetch("jt8s-3q52.json", {
+      funding_year: CURRENT_FY,
+      "$where": "billed_entity_state='TX'"
+    });
+    if (!data.length) { console.log("No 470 data returned"); return; }
+    console.log("Sample 470 keys:", Object.keys(data[0]).join(", "));
+    const rows = data.map(d => ({
       application_number:   d.application_number   || d.form_470_application_number || null,
       funding_year:         d.funding_year          || CURRENT_FY,
       billed_entity_name:   d.billed_entity_name    || d.entity_name || null,
@@ -86,11 +73,11 @@ async function sync470s() {
       narrative:            d.narrative             || null,
       raw:                  d,
     }));
-    for (let i = 0; i < rows.length; i += 500) {
-      const batch = rows.slice(i, i + 500);
+    for (let i = 0; i < rows.length; i += 200) {
+      const batch = rows.slice(i, i + 200);
       const { error } = await supabase.from("form_470s").upsert(batch, { onConflict: "application_number" });
       if (error) console.error("470 upsert error:", error.message);
-      else console.log(`  Upserted batch ${Math.floor(i/500)+1} (${batch.length} records)`);
+      else console.log(`  Upserted batch ${Math.floor(i/200)+1} (${batch.length} records)`);
     }
     console.log(`Synced ${rows.length} Form 470 records`);
   } catch (err) {
@@ -102,7 +89,7 @@ async function sync470s() {
 async function sync471s() {
   console.log("Syncing Form 471s...");
   try {
-    const data = await usacFetch("9s6t-3gg4.json", { funding_year: CURRENT_FY });
+    const data = await usacFetch("9s6t-3gg4.json", { funding_year: CURRENT_FY, "$where": "state='TX'" });
     if (!data.length) { console.log("No 471 data returned"); return; }
     const rows = data.map(d => ({
       application_number:   d.application_number  || null,
@@ -131,7 +118,7 @@ async function sync471s() {
 async function syncCommitments() {
   console.log("Syncing Commitments...");
   try {
-    const data = await usacFetch("5ytk-gnvq.json", { funding_year: CURRENT_FY });
+    const data = await usacFetch("5ytk-gnvq.json", { funding_year: CURRENT_FY, "$where": "state='TX'" });
     if (!data.length) { console.log("No commitments data returned"); return; }
     const rows = data.map(d => ({
       frn:                  d.frn                  || null,
