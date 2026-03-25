@@ -385,6 +385,54 @@ app.get("/api/frn-status", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/bid-stages — auto-detect stage for tagged 470s ──────────────────
+app.get("/api/bid-stages", requireAuth, async (req, res) => {
+  try {
+    const { app_numbers } = req.query;
+    if (!app_numbers) return res.json({ status:"success", data:{} });
+    const nums = app_numbers.split(",").map(s => s.trim()).filter(Boolean);
+    if (!nums.length) return res.json({ status:"success", data:{} });
+
+    function detectStage(frn_status, f471_status) {
+      const s = (frn_status || "").toLowerCase();
+      const t = (f471_status || "").toLowerCase();
+      if (s.includes("appeal"))                          return "On Appeal";
+      if (s.includes("funded") || s.includes("commit"))  return "Funded";
+      if (s.includes("wave"))                            return "Wave Ready";
+      if (s.includes("final"))                           return "Final Review";
+      if (s.includes("review") || s.includes("pend"))    return "Under Review";
+      if (s.includes("deny")   || s.includes("reject"))  return "Denied";
+      if (t.includes("certif") || t.includes("submit") || t.length > 0) return "Bid Submitted";
+      return null;
+    }
+
+    // Fetch commitments and 471s for all app numbers in parallel
+    const [comRes, f471Res] = await Promise.all([
+      supabase.from("commitments").select("application_number,form_471_frn_status_name").in("application_number", nums),
+      supabase.from("form_471s").select("application_number,form_471_status_name").in("application_number", nums),
+    ]);
+
+    // Build lookup maps
+    const comMap  = {};
+    for (const r of (comRes.data || [])) {
+      if (!comMap[r.application_number]) comMap[r.application_number] = r.form_471_frn_status_name;
+    }
+    const f471Map = {};
+    for (const r of (f471Res.data || [])) {
+      if (!f471Map[r.application_number]) f471Map[r.application_number] = r.form_471_status_name;
+    }
+
+    const stages = {};
+    for (const num of nums) {
+      stages[num] = detectStage(comMap[num], f471Map[num]);
+    }
+
+    res.json({ status:"success", data: stages });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── PATCH /api/tags/:appNumber — update bid status / financials ───────────────
 app.patch("/api/tags/:appNumber", requireAuth, async (req, res) => {
   try {
