@@ -98,7 +98,7 @@ async function sync470s() {
 async function sync471s() {
   console.log("Syncing Form 471s...");
   try {
-    const data = await usacFetch("9s6i-myen.json", { funding_year: CURRENT_FY, "$where": "billed_entity_state='TX'" });
+    const data = await usacFetch("9s6i-myen.json", { "$limit": "5" });
     if (!data.length) { console.log("No 471 data returned"); return; }
     console.log("Sample 471 keys:", Object.keys(data[0]).join(", "));
     const rows = data.map(d => ({
@@ -128,7 +128,7 @@ async function sync471s() {
 async function syncCommitments() {
   console.log("Syncing Commitments...");
   try {
-    const data = await usacFetch("srbr-2d59.json", { funding_year: CURRENT_FY, "$where": "billed_entity_state='TX'" });
+    const data = await usacFetch("srbr-2d59.json", { "$limit": "5" });
     if (!data.length) { console.log("No commitments data returned"); return; }
     console.log("Sample commitments keys:", Object.keys(data[0]).join(", "));
     const rows = data.map(d => ({
