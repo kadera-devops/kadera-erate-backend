@@ -50,21 +50,20 @@ async function sync470s() {
     let   all  = [];
     while (true) {
       const url = `https://opendata.usac.org/api/v3/views/jt8s-3q52/query.json?pageNumber=${page}&pageSize=${pageSize}`;
-      console.log(`USAC 470 fetch page ${page}: ${url}`);
-      const res  = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: `SELECT * WHERE funding_year = '${CURRENT_FY}'`
-        })
-      });
-      const json = await res.json();
-      const data = json.data || (Array.isArray(json) ? json : []);
+      console.log(`USAC 470 fetch page ${page}`);
+      const res  = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const text = await res.text();
+      console.log(`USAC 470 status: ${res.status}, preview: ${text.substring(0,300)}`);
+      let json;
+      try { json = JSON.parse(text); } catch(e) { console.error("JSON parse error:", e.message); break; }
+      const data = Array.isArray(json) ? json : (json.data || json.results || []);
       if (!Array.isArray(data) || data.length === 0) break;
+      if (page === 1) console.log("Sample record keys:", Object.keys(data[0]).join(", "));
       all = all.concat(data);
       console.log(`  Page ${page}: ${data.length} records (total: ${all.length})`);
       if (data.length < pageSize) break;
       page++;
+      if (page > 3) { console.log("Stopping at 3 pages for test"); break; }
     }
     if (!all.length) { console.log("No 470 data returned"); return; }
     const rows = all.map(d => ({
@@ -85,7 +84,6 @@ async function sync470s() {
       narrative:            d.narrative             || null,
       raw:                  d,
     }));
-    // Upsert in batches of 500
     for (let i = 0; i < rows.length; i += 500) {
       const batch = rows.slice(i, i + 500);
       const { error } = await supabase.from("form_470s").upsert(batch, { onConflict: "application_number" });
