@@ -25,7 +25,7 @@ const CURRENT_FY = "2025";
 const USAC_APP_TOKEN = process.env.USAC_APP_TOKEN || "";
 
 // ── Helper: fetch all pages from USAC Socrata API ─────────────────────────────
-async function usacFetch(endpoint, params = {}) {
+async function usacFetch(endpoint, params = {}, maxRecords = 50000) {
   const limit  = 1000;
   let   offset = 0;
   let   all    = [];
@@ -38,6 +38,7 @@ async function usacFetch(endpoint, params = {}) {
     if (!Array.isArray(data) || data.length === 0) break;
     all = all.concat(data);
     if (data.length < limit) break;
+    if (all.length >= maxRecords) { console.log(`Max records (${maxRecords}) reached`); break; }
     offset += limit;
   }
   return all;
@@ -98,7 +99,7 @@ async function sync470s() {
 async function sync471s() {
   console.log("Syncing Form 471s...");
   try {
-    const data = await usacFetch("9s6i-myen.json", { "$limit": "5" });
+    const data = await usacFetch("9s6i-myen.json", {}, 10);
     if (!data.length) { console.log("No 471 data returned"); return; }
     console.log("Sample 471 keys:", Object.keys(data[0]).join(", "));
     const rows = data.map(d => ({
@@ -128,7 +129,7 @@ async function sync471s() {
 async function syncCommitments() {
   console.log("Syncing Commitments...");
   try {
-    const data = await usacFetch("srbr-2d59.json", { "$limit": "5" });
+    const data = await usacFetch("srbr-2d59.json", {}, 10);
     if (!data.length) { console.log("No commitments data returned"); return; }
     console.log("Sample commitments keys:", Object.keys(data[0]).join(", "));
     const rows = data.map(d => ({
