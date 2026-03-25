@@ -179,11 +179,58 @@ async function syncCommitments() {
   }
 }
 
+// ── Sync: FRN Line Items ─────────────────────────────────────────────────────
+async function syncLineItems() {
+  console.log("Syncing FRN Line Items (TX only)...");
+  try {
+    const data = await usacFetch("hbj5-2bpj.json", {
+      funding_year: CURRENT_FY,
+      "$where": "state='TX'"
+    }, 100000);
+    if (!data.length) { console.log("No line item data returned"); return; }
+    console.log(`Fetched ${data.length} FRN line item records`);
+    const seen = new Set();
+    const rows = [];
+    for (const d of data) {
+      const key = `${d.funding_request_number}-${d.form_471_line_item_number}`;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        application_number:                          d.application_number                          || null,
+        funding_year:                                d.funding_year                                || CURRENT_FY,
+        funding_request_number:                      d.funding_request_number                      || null,
+        form_471_line_item_number:                   d.form_471_line_item_number                   || null,
+        ben:                                         d.ben                                         || null,
+        organization_name:                           d.organization_name                           || null,
+        state:                                       d.state                                       || null,
+        form_471_manufacturer_name:                  d.form_471_manufacturer_name                  || null,
+        other_manufacturer_desc:                     d.other_manufacturer_desc                     || null,
+        model_of_equipment:                          d.model_of_equipment                          || null,
+        form_471_product_name:                       d.form_471_product_name                       || null,
+        form_471_function_name:                      d.form_471_function_name                      || null,
+        form_471_purpose_name:                       d.form_471_purpose_name                       || null,
+        price:                                       parseFloat(d.price)                           || null,
+        pre_discount_extended_eligible_line_item_costs: parseFloat(d.pre_discount_extended_eligible_line_item_costs) || null,
+      });
+    }
+    for (let i = 0; i < rows.length; i += 200) {
+      const batch = rows.slice(i, i + 200);
+      const { error } = await supabase.from("frn_line_items").upsert(batch, { onConflict: "funding_request_number,form_471_line_item_number" });
+      if (error) console.error("Line items upsert error:", error.message);
+      else console.log(`  Upserted line items batch ${Math.floor(i/200)+1} (${batch.length} records)`);
+    }
+    console.log(`Synced ${rows.length} FRN line item records`);
+  } catch (err) {
+    console.error("syncLineItems error:", err.message);
+  }
+}
+
 async function syncAll() {
   console.log("=== Starting full USAC sync ===");
   await sync470s();
   await sync471s();
   await syncCommitments();
+  await syncLineItems();
   console.log("=== USAC sync complete ===");
 }
 
@@ -212,19 +259,6 @@ app.get("/api/sync-now", async (req, res) => {
   res.json({ status: "started", message: "Sync running — check logs in 2-3 minutes" });
   syncAll();
 });
-// ── TEMP: FRN Line Items field discovery ──────────────────────────────────────
-app.get("/api/discover-line-items", async (req, res) => {
-  try {
-    const url = `${USAC_BASE}/hbj5-2bpj.json?$limit=1&funding_year=2026&$where=org_state='TX'`;
-    const r   = await fetch(url, { headers: { "X-App-Token": USAC_APP_TOKEN } });
-    const d   = await r.json();
-    if (!d.length) return res.json({ status:"error", message:"No records returned", raw: d });
-    res.json({ status:"success", fields: Object.keys(d[0]).sort(), sample: d[0] });
-  } catch (err) {
-    res.status(500).json({ status:"error", message: err.message });
-  }
-});
-
 
 // Manual sync trigger (requires auth)
 app.post("/api/sync", requireAuth, async (req, res) => {
@@ -401,20 +435,24 @@ app.get("/api/frn-status", requireAuth, async (req, res) => {
 // ── GET /api/competitive-intel ────────────────────────────────────────────────
 app.get("/api/competitive-intel", requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("commitments")
-      .select("spin_name, form_471_service_type_name, funding_commitment_request, form_471_frn_status_name")
-      .not("spin_name", "is", null);
-    if (error) throw error;
-
     const MANUFACTURERS = [
       "Juniper","Aruba","HPE","Cisco","Meraki","Ubiquiti","Extreme",
       "Fortinet","Palo Alto","Sophos","Dell","Ruckus","Netgear","Cambium","Zyxel"
     ];
 
+    // Fetch commitments and line items in parallel
+    const [comRes, lineRes] = await Promise.all([
+      supabase.from("commitments").select("spin_name, form_471_service_type_name, funding_commitment_request").not("spin_name","is",null),
+      supabase.from("frn_line_items").select("form_471_manufacturer_name, other_manufacturer_desc, form_471_product_name, pre_discount_extended_eligible_line_item_costs").not("form_471_manufacturer_name","is",null),
+    ]);
+    if (comRes.error) throw comRes.error;
+
+    const commitments = comRes.data || [];
+    const lineItems   = lineRes.data || [];
+
     // Top 25 providers by commitment count
     const providerMap = {};
-    for (const r of data) {
+    for (const r of commitments) {
       const name = (r.spin_name || "").trim();
       if (!name) continue;
       if (!providerMap[name]) providerMap[name] = { count:0, amount:0 };
@@ -426,15 +464,18 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       .sort((a,b) => b.count - a.count)
       .slice(0, 25);
 
-    // Manufacturer breakdown
+    // Manufacturer breakdown — from real form_471_manufacturer_name field
     const mfrMap = {};
     for (const mfr of MANUFACTURERS) mfrMap[mfr] = { count:0, amount:0 };
-    for (const r of data) {
-      const haystack = `${r.spin_name || ""} ${r.form_471_service_type_name || ""}`.toLowerCase();
+
+    for (const r of lineItems) {
+      const rawName = (r.form_471_manufacturer_name || r.other_manufacturer_desc || "").trim();
+      const amount  = parseFloat(r.pre_discount_extended_eligible_line_item_costs) || 0;
       for (const mfr of MANUFACTURERS) {
-        if (haystack.includes(mfr.toLowerCase())) {
+        if (rawName.toLowerCase().includes(mfr.toLowerCase())) {
           mfrMap[mfr].count++;
-          mfrMap[mfr].amount += parseFloat(r.funding_commitment_request) || 0;
+          mfrMap[mfr].amount += amount;
+          break; // match first brand found
         }
       }
     }
@@ -442,9 +483,9 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       name, count: mfrMap[name].count, amount: Math.round(mfrMap[name].amount),
     })).sort((a,b) => b.count - a.count);
 
-    // Service type breakdown
+    // Service type breakdown from commitments
     const serviceMap = {};
-    for (const r of data) {
+    for (const r of commitments) {
       const svc = (r.form_471_service_type_name || "Unknown").trim();
       if (!serviceMap[svc]) serviceMap[svc] = 0;
       serviceMap[svc]++;
@@ -454,7 +495,19 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       .sort((a,b) => b.count - a.count)
       .slice(0, 8);
 
-    res.json({ status:"success", data:{ topProviders, manufacturers, serviceTypes, total: data.length } });
+    // Product breakdown from line items
+    const productMap = {};
+    for (const r of lineItems) {
+      const prod = (r.form_471_product_name || "Unknown").trim();
+      if (!productMap[prod]) productMap[prod] = 0;
+      productMap[prod]++;
+    }
+    const topProducts = Object.entries(productMap)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a,b) => b.count - a.count)
+      .slice(0, 10);
+
+    res.json({ status:"success", data:{ topProviders, manufacturers, serviceTypes, topProducts, total: commitments.length, lineItemTotal: lineItems.length } });
   } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
   }
