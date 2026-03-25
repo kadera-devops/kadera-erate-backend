@@ -96,58 +96,84 @@ async function sync470s() {
 }
 
 // ── Sync: Form 471 ───────────────────────────────────────────────────────────
+// Dataset: 9s6i-myen — E-Rate FCC Form 471 Download Tool
 async function sync471s() {
-  console.log("Syncing Form 471s...");
+  console.log("Syncing Form 471s (TX only)...");
   try {
-    const data = await usacFetch("9s6i-myen.json", {}, 10);
+    const data = await usacFetch("9s6i-myen.json", { funding_year: CURRENT_FY, "$where": "org_state='TX'" });
     if (!data.length) { console.log("No 471 data returned"); return; }
-    console.log("Sample 471 keys:", Object.keys(data[0]).join(", "));
-    const rows = data.map(d => ({
-      application_number:   d.application_number  || null,
-      frn:                  d.frn                 || null,
-      funding_year:         d.funding_year        || CURRENT_FY,
-      billed_entity_name:   d.billed_entity_name  || null,
-      billed_entity_number: d.billed_entity_number|| null,
-      state:                d.state               || null,
-      service_type:         d.service_type        || null,
-      amount_requested:     parseFloat(d.amount_requested)  || null,
-      amount_committed:     parseFloat(d.amount_committed)  || null,
-      application_status:   d.application_status  || null,
-      priority:             d.priority            || null,
-      date_filed:           d.date_filed          || null,
-      raw:                  d,
-    }));
-    const { error } = await supabase.from("form_471s").upsert(rows, { onConflict: "frn" });
-    if (error) console.error("471 upsert error:", error.message);
-    else console.log(`Synced ${rows.length} Form 471 records`);
+    console.log(`Fetched ${data.length} Form 471 records`);
+    const seen471 = new Set();
+    const rows = [];
+    for (const d of data) {
+      const key = `${d.application_number}-${d.funding_year}`;
+      if (!key || seen471.has(key)) continue;
+      seen471.add(key);
+      rows.push({
+        application_number:          d.application_number          || null,
+        funding_year:                d.funding_year                || CURRENT_FY,
+        organization_name:           d.organization_name           || null,
+        epc_organization_id:         d.epc_organization_id         || null,
+        org_state:                   d.org_state                   || null,
+        chosen_category_of_service:  d.chosen_category_of_service  || null,
+        form_471_status_name:        d.form_471_status_name        || null,
+        funding_request_amount:      parseFloat(d.funding_request_amount) || null,
+        pre_discount_eligible_amount: parseFloat(d.pre_discount_eligible_amount) || null,
+        c1_discount:                 d.c1_discount                 || null,
+        c2_discount:                 d.c2_discount                 || null,
+        cnct_first_name:             d.cnct_first_name             || null,
+        cnct_last_name:              d.cnct_last_name              || null,
+        cnct_email:                  d.cnct_email                  || null,
+        cnct_phone:                  d.cnct_phone                  || null,
+        certified_datetime:          d.certified_datetime          || null,
+        raw:                         d,
+      });
+    }
+    for (let i = 0; i < rows.length; i += 200) {
+      const batch = rows.slice(i, i + 200);
+      const { error } = await supabase.from("form_471s").upsert(batch, { onConflict: "application_number,funding_year" });
+      if (error) console.error("471 upsert error:", error.message);
+      else console.log(`  Upserted 471 batch ${Math.floor(i/200)+1} (${batch.length} records)`);
+    }
+    console.log(`Synced ${rows.length} Form 471 records`);
   } catch (err) {
     console.error("sync471s error:", err.message);
   }
 }
 
 // ── Sync: Commitments ─────────────────────────────────────────────────────────
+// Dataset: srbr-2d59 — E-Rate Commitments
 async function syncCommitments() {
-  console.log("Syncing Commitments...");
+  console.log("Syncing Commitments (TX only)...");
   try {
-    const data = await usacFetch("srbr-2d59.json", {}, 10);
+    const data = await usacFetch("srbr-2d59.json", { funding_year: CURRENT_FY, "$where": "state='TX'" });
     if (!data.length) { console.log("No commitments data returned"); return; }
-    console.log("Sample commitments keys:", Object.keys(data[0]).join(", "));
+    console.log(`Fetched ${data.length} Commitment records`);
     const rows = data.map(d => ({
-      frn:                  d.frn                  || null,
-      funding_year:         d.funding_year         || CURRENT_FY,
-      billed_entity_name:   d.billed_entity_name   || null,
-      billed_entity_number: d.billed_entity_number || null,
-      state:                d.state                || null,
-      service_type:         d.service_type         || null,
-      amount_committed:     parseFloat(d.amount_committed) || null,
-      commitment_date:      d.commitment_date      || null,
-      disbursed_amount:     parseFloat(d.disbursed_amount) || null,
-      status:               d.status               || null,
-      raw:                  d,
+      funding_request_number:        d.funding_request_number       || null,
+      application_number:            d.application_number           || null,
+      funding_year:                  d.funding_year                 || CURRENT_FY,
+      organization_name:             d.organization_name            || null,
+      ben:                           d.ben                          || null,
+      state:                         d.state                        || null,
+      form_471_service_type_name:    d.form_471_service_type_name   || null,
+      form_471_frn_status_name:      d.form_471_frn_status_name     || null,
+      funding_commitment_request:    parseFloat(d.funding_commitment_request) || null,
+      total_pre_discount_costs:      parseFloat(d.total_pre_discount_costs) || null,
+      dis_pct:                       d.dis_pct                      || null,
+      fcdl_letter_date:              d.fcdl_letter_date             || null,
+      cnct_name:                     d.cnct_name                    || null,
+      cnct_email:                    d.cnct_email                   || null,
+      spin_name:                     d.spin_name                    || null,
+      raw:                           d,
     }));
-    const { error } = await supabase.from("commitments").upsert(rows, { onConflict: "frn" });
-    if (error) console.error("Commitments upsert error:", error.message);
-    else console.log(`Synced ${rows.length} Commitment records`);
+    for (let i = 0; i < rows.length; i += 200) {
+      const batch = rows.slice(i, i + 200);
+      const { error } = await supabase.from("commitments").upsert(batch, { onConflict: "funding_request_number" });
+      if (error) console.error("Commitments upsert error:", error.message);
+      else console.log(`  Upserted commitments batch ${Math.floor(i/200)+1} (${batch.length} records)`);
+    }
+    console.log(`Synced ${rows.length} Commitment records`);
   } catch (err) {
     console.error("syncCommitments error:", err.message);
   }
