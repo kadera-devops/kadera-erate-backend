@@ -181,11 +181,12 @@ async function syncCommitments() {
 
 // ── Sync: FRN Line Items ─────────────────────────────────────────────────────
 async function syncLineItems() {
-  console.log("Syncing FRN Line Items (TX only)...");
+  const LINE_ITEMS_FY = "2025"; // FY2025 — used for competitive intel only, FY2026 data not yet published
+  console.log(`Syncing FRN Line Items FY${LINE_ITEMS_FY} (TX only)...`);
   try {
     const data = await usacFetch("hbj5-2bpj.json", {
-      funding_year: CURRENT_FY,
-      "$where": "state='TX'"
+      funding_year: LINE_ITEMS_FY,
+      "$where": "upper(state)='TX'"
     }, 100000);
     if (!data.length) { console.log("No line item data returned"); return; }
     console.log(`Fetched ${data.length} FRN line item records`);
@@ -258,17 +259,21 @@ app.get("/api/health", (req, res) => {
 // ── TEMP: Line items diagnostic ───────────────────────────────────────────────
 app.get("/api/diag-line-items", async (req, res) => {
   try {
-    const [countRes, sampleRes, mfrRes] = await Promise.all([
+    // Check Supabase table
+    const [countRes, sampleRes] = await Promise.all([
       supabase.from("frn_line_items").select("*", { count:"exact", head:true }),
-      supabase.from("frn_line_items").select("form_471_manufacturer_name, other_manufacturer_desc, model_of_equipment, form_471_product_name, state").limit(5),
-      supabase.from("frn_line_items").select("form_471_manufacturer_name").not("form_471_manufacturer_name","is",null).limit(5),
+      supabase.from("frn_line_items").select("form_471_manufacturer_name, model_of_equipment, form_471_product_name, state").limit(3),
     ]);
+
+    // Also sample the raw USAC API with no state filter to see real field values
+    const rawUrl  = `${USAC_BASE}/hbj5-2bpj.json?funding_year=2026&$limit=2`;
+    const rawRes  = await fetch(rawUrl, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const rawData = await rawRes.json();
+
     res.json({
-      total_rows:    countRes.count,
-      sample:        sampleRes.data,
-      with_mfr:      mfrRes.data,
-      count_error:   countRes.error?.message,
-      sample_error:  sampleRes.error?.message,
+      supabase_count: countRes.count,
+      supabase_sample: sampleRes.data,
+      usac_sample: Array.isArray(rawData) ? rawData.map(r => ({ state: r.state, manufacturer: r.form_471_manufacturer_name, product: r.form_471_product_name, funding_year: r.funding_year })) : rawData,
     });
   } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
@@ -527,7 +532,7 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       .sort((a,b) => b.count - a.count)
       .slice(0, 10);
 
-    res.json({ status:"success", data:{ topProviders, manufacturers, serviceTypes, topProducts, total: commitments.length, lineItemTotal: lineItems.length } });
+    res.json({ status:"success", data:{ topProviders, manufacturers, serviceTypes, topProducts, total: commitments.length, lineItemTotal: lineItems.length, lineItemsFY: "2025" } });
   } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
   }
