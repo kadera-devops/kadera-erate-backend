@@ -20,7 +20,7 @@ app.use(express.json());
 
 // ── USAC Open Data API config ─────────────────────────────────────────────────
 const USAC_BASE = "https://opendata.usac.org/resource";
-const CURRENT_FY = "2025";
+const CURRENT_FY = "2026";
 
 const USAC_APP_TOKEN = process.env.USAC_APP_TOKEN || "";
 
@@ -299,7 +299,7 @@ app.get("/api/stats", requireAuth, async (req, res) => {
       supabase.from("form_471s").select("*", { count: "exact", head: true }),
       supabase.from("commitments").select("*", { count: "exact", head: true }),
     ]);
-    const open470 = await supabase.from("form_470s").select("*", { count: "exact", head: true }).ilike("application_status", "%open%");
+    const open470 = await supabase.from("form_470s").select("*", { count: "exact", head: true }).ilike("application_status", "%certif%");
     res.json({
       status: "success",
       data: {
@@ -310,6 +310,56 @@ app.get("/api/stats", requireAuth, async (req, res) => {
         funding_year: CURRENT_FY,
       }
     });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// ── GET /api/tags — get all tagged 470s for current user ─────────────────────
+app.get("/api/tags", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("tagged_470s")
+      .select("*")
+      .eq("user_id", req.user.id)
+      .order("tagged_at", { ascending: false });
+    if (error) throw error;
+    res.json({ status: "success", data: data || [] });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// ── POST /api/tags — tag a 470 ────────────────────────────────────────────────
+app.post("/api/tags", requireAuth, async (req, res) => {
+  try {
+    const { application_number, billed_entity_name, state, service_category, bid_due_date, funding_year } = req.body;
+    if (!application_number) return res.status(400).json({ status: "error", message: "application_number required" });
+    const { error } = await supabase.from("tagged_470s").upsert({
+      user_id: req.user.id,
+      application_number,
+      billed_entity_name: billed_entity_name || null,
+      state:              state              || null,
+      service_category:   service_category   || null,
+      bid_due_date:       bid_due_date       || null,
+      funding_year:       funding_year       || null,
+    }, { onConflict: "user_id,application_number" });
+    if (error) throw error;
+    res.json({ status: "success" });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// ── DELETE /api/tags/:appNumber — untag a 470 ─────────────────────────────────
+app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase.from("tagged_470s")
+      .delete()
+      .eq("user_id", req.user.id)
+      .eq("application_number", req.params.appNumber);
+    if (error) throw error;
+    res.json({ status: "success" });
   } catch (err) {
     res.status(500).json({ status: "error", message: err.message });
   }
