@@ -567,6 +567,53 @@ app.get("/api/provider-applicants", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/part-lookup — search model_of_equipment across frn_line_items ────
+app.get("/api/part-lookup", requireAuth, async (req, res) => {
+  try {
+    const { q, limit = 100 } = req.query;
+    if (!q || q.trim().length < 2) return res.status(400).json({ status:"error", message:"query must be at least 2 characters" });
+
+    // Search line items by model, product name, or manufacturer
+    const { data: lineItems, error } = await supabase
+      .from("frn_line_items")
+      .select("application_number, organization_name, model_of_equipment, form_471_manufacturer_name, form_471_product_name, form_471_function_name, price, pre_discount_extended_eligible_line_item_costs, funding_request_number")
+      .or(`model_of_equipment.ilike.%${q.trim()}%,form_471_product_name.ilike.%${q.trim()}%,form_471_manufacturer_name.ilike.%${q.trim()}%`)
+      .order("pre_discount_extended_eligible_line_item_costs", { ascending: false, nullsFirst: false })
+      .limit(Number(limit));
+
+    if (error) throw error;
+    if (!lineItems || lineItems.length === 0) return res.json({ status:"success", data:[] });
+
+    // Fetch spin_names for all unique application numbers
+    const appNums = [...new Set(lineItems.map(r => r.application_number).filter(Boolean))];
+    const { data: commits } = await supabase
+      .from("commitments")
+      .select("application_number, spin_name")
+      .in("application_number", appNums);
+
+    const spinMap = {};
+    for (const c of commits || []) {
+      if (!spinMap[c.application_number]) spinMap[c.application_number] = c.spin_name;
+    }
+
+    const results = lineItems.map(r => ({
+      application_number:   r.application_number,
+      organization_name:    r.organization_name,
+      model_of_equipment:   r.model_of_equipment,
+      manufacturer:         r.form_471_manufacturer_name,
+      product_name:         r.form_471_product_name,
+      function_name:        r.form_471_function_name,
+      unit_price:           parseFloat(r.price) || null,
+      total_cost:           parseFloat(r.pre_discount_extended_eligible_line_item_costs) || null,
+      spin_name:            spinMap[r.application_number] || null,
+    }));
+
+    res.json({ status:"success", data: results, count: results.length });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/bid-stages — auto-detect stage for tagged 470s ──────────────────
 app.get("/api/bid-stages", requireAuth, async (req, res) => {
   try {
