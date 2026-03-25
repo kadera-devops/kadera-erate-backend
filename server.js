@@ -365,6 +365,24 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
+// ── PATCH /api/tags/:appNumber — update bid status / financials ───────────────
+app.patch("/api/tags/:appNumber", requireAuth, async (req, res) => {
+  try {
+    const allowed = ["responded", "bid_status", "bid_amount", "cogs"];
+    const fields  = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
+    if (!Object.keys(fields).length) return res.status(400).json({ status: "error", message: "No valid fields provided" });
+    const { error } = await supabase
+      .from("tagged_470s")
+      .update(fields)
+      .eq("user_id", req.user.id)
+      .eq("application_number", req.params.appNumber);
+    if (error) throw error;
+    res.json({ status: "success" });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log("============================================");
