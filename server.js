@@ -385,6 +385,68 @@ app.get("/api/frn-status", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/competitive-intel ────────────────────────────────────────────────
+app.get("/api/competitive-intel", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("commitments")
+      .select("spin_name, form_471_service_type_name, funding_commitment_request, form_471_frn_status_name")
+      .not("spin_name", "is", null);
+    if (error) throw error;
+
+    const MANUFACTURERS = [
+      "Juniper","Aruba","HPE","Cisco","Meraki","Ubiquiti","Extreme",
+      "Fortinet","Palo Alto","Sophos","Dell","Ruckus","Netgear","Cambium","Zyxel"
+    ];
+
+    // Top 25 providers by commitment count
+    const providerMap = {};
+    for (const r of data) {
+      const name = (r.spin_name || "").trim();
+      if (!name) continue;
+      if (!providerMap[name]) providerMap[name] = { count:0, amount:0 };
+      providerMap[name].count++;
+      providerMap[name].amount += parseFloat(r.funding_commitment_request) || 0;
+    }
+    const topProviders = Object.entries(providerMap)
+      .map(([name, v]) => ({ name, count: v.count, amount: Math.round(v.amount) }))
+      .sort((a,b) => b.count - a.count)
+      .slice(0, 25);
+
+    // Manufacturer breakdown
+    const mfrMap = {};
+    for (const mfr of MANUFACTURERS) mfrMap[mfr] = { count:0, amount:0 };
+    for (const r of data) {
+      const haystack = `${r.spin_name || ""} ${r.form_471_service_type_name || ""}`.toLowerCase();
+      for (const mfr of MANUFACTURERS) {
+        if (haystack.includes(mfr.toLowerCase())) {
+          mfrMap[mfr].count++;
+          mfrMap[mfr].amount += parseFloat(r.funding_commitment_request) || 0;
+        }
+      }
+    }
+    const manufacturers = MANUFACTURERS.map(name => ({
+      name, count: mfrMap[name].count, amount: Math.round(mfrMap[name].amount),
+    })).sort((a,b) => b.count - a.count);
+
+    // Service type breakdown
+    const serviceMap = {};
+    for (const r of data) {
+      const svc = (r.form_471_service_type_name || "Unknown").trim();
+      if (!serviceMap[svc]) serviceMap[svc] = 0;
+      serviceMap[svc]++;
+    }
+    const serviceTypes = Object.entries(serviceMap)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a,b) => b.count - a.count)
+      .slice(0, 8);
+
+    res.json({ status:"success", data:{ topProviders, manufacturers, serviceTypes, total: data.length } });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/bid-stages — auto-detect stage for tagged 470s ──────────────────
 app.get("/api/bid-stages", requireAuth, async (req, res) => {
   try {
