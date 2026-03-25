@@ -212,6 +212,19 @@ app.get("/api/sync-now", async (req, res) => {
   res.json({ status: "started", message: "Sync running — check logs in 2-3 minutes" });
   syncAll();
 });
+// ── TEMP: FRN Line Items field discovery ──────────────────────────────────────
+app.get("/api/discover-line-items", async (req, res) => {
+  try {
+    const url = `${USAC_BASE}/hbj5-2bpj.json?$limit=1&funding_year=2026&$where=org_state='TX'`;
+    const r   = await fetch(url, { headers: { "X-App-Token": USAC_APP_TOKEN } });
+    const d   = await r.json();
+    if (!d.length) return res.json({ status:"error", message:"No records returned", raw: d });
+    res.json({ status:"success", fields: Object.keys(d[0]).sort(), sample: d[0] });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 
 // Manual sync trigger (requires auth)
 app.post("/api/sync", requireAuth, async (req, res) => {
