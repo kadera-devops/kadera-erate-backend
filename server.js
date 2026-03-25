@@ -98,8 +98,9 @@ async function sync470s() {
 async function sync471s() {
   console.log("Syncing Form 471s...");
   try {
-    const data = await usacFetch("hbj5-3xbd.json", { funding_year: CURRENT_FY, "$where": "applicant_state='TX'" });
+    const data = await usacFetch("9s6i-myen.json", { funding_year: CURRENT_FY, "$where": "billed_entity_state='TX'" });
     if (!data.length) { console.log("No 471 data returned"); return; }
+    console.log("Sample 471 keys:", Object.keys(data[0]).join(", "));
     const rows = data.map(d => ({
       application_number:   d.application_number  || null,
       frn:                  d.frn                 || null,
@@ -127,8 +128,9 @@ async function sync471s() {
 async function syncCommitments() {
   console.log("Syncing Commitments...");
   try {
-    const data = await usacFetch("avi8-svp9.json", { funding_year: CURRENT_FY, "$where": "applicant_state='TX'" });
+    const data = await usacFetch("srbr-2d59.json", { funding_year: CURRENT_FY, "$where": "billed_entity_state='TX'" });
     if (!data.length) { console.log("No commitments data returned"); return; }
+    console.log("Sample commitments keys:", Object.keys(data[0]).join(", "));
     const rows = data.map(d => ({
       frn:                  d.frn                  || null,
       funding_year:         d.funding_year         || CURRENT_FY,
