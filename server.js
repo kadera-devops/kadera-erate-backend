@@ -55,24 +55,33 @@ async function sync470s() {
     });
     if (!data.length) { console.log("No 470 data returned"); return; }
     console.log("Sample 470 keys:", Object.keys(data[0]).join(", "));
-    const rows = data.map(d => ({
-      application_number:   d.application_number   || null,
-      funding_year:         d.funding_year          || CURRENT_FY,
-      billed_entity_name:   d.billed_entity_name    || null,
-      billed_entity_number: d.billed_entity_number  || null,
-      state:                d.billed_entity_state   || null,
-      service_category:     d.category_two_description || d.service_category || null,
-      application_status:   d.fcc_form_470_status   || d.application_status || null,
-      date_posted:          d.certified_date_time   || d.last_modified_date_time || null,
-      bid_due_date:         d.allowable_contract_date || null,
-      tech_contact_name:    d.technical_contact_name  || d.contact_name || null,
-      tech_contact_email:   d.technical_contact_email || d.contact_email || null,
-      tech_contact_phone:   d.technical_contact_phone || d.contact_phone || null,
-      consultant_name:      null,
-      consultant_email:     null,
-      narrative:            d.form_nickname         || null,
-      raw:                  d,
-    }));
+    // Deduplicate by application_number before upsert
+    const seen = new Set();
+    const rows = [];
+    for (const d of data) {
+      const key = d.application_number || null;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        application_number:   d.application_number   || null,
+        funding_year:         d.funding_year          || CURRENT_FY,
+        billed_entity_name:   d.billed_entity_name    || null,
+        billed_entity_number: d.billed_entity_number  || null,
+        state:                d.billed_entity_state   || null,
+        service_category:     d.category_two_description || d.service_category || null,
+        application_status:   d.fcc_form_470_status   || d.application_status || null,
+        date_posted:          d.certified_date_time   || d.last_modified_date_time || null,
+        bid_due_date:         d.allowable_contract_date || null,
+        tech_contact_name:    d.technical_contact_name  || d.contact_name || null,
+        tech_contact_email:   d.technical_contact_email || d.contact_email || null,
+        tech_contact_phone:   d.technical_contact_phone || d.contact_phone || null,
+        consultant_name:      null,
+        consultant_email:     null,
+        narrative:            d.form_nickname         || null,
+        raw:                  d,
+      });
+    }
+    console.log(`Deduplicated: ${data.length} → ${rows.length} unique records`);
     for (let i = 0; i < rows.length; i += 200) {
       const batch = rows.slice(i, i + 200);
       const { error } = await supabase.from("form_470s").upsert(batch, { onConflict: "application_number" });
@@ -89,7 +98,7 @@ async function sync470s() {
 async function sync471s() {
   console.log("Syncing Form 471s...");
   try {
-    const data = await usacFetch("9s6t-3gg4.json", { funding_year: CURRENT_FY, "$where": "state='TX'" });
+    const data = await usacFetch("hbj5-3xbd.json", { funding_year: CURRENT_FY, "$where": "applicant_state='TX'" });
     if (!data.length) { console.log("No 471 data returned"); return; }
     const rows = data.map(d => ({
       application_number:   d.application_number  || null,
@@ -118,7 +127,7 @@ async function sync471s() {
 async function syncCommitments() {
   console.log("Syncing Commitments...");
   try {
-    const data = await usacFetch("5ytk-gnvq.json", { funding_year: CURRENT_FY, "$where": "state='TX'" });
+    const data = await usacFetch("avi8-svp9.json", { funding_year: CURRENT_FY, "$where": "applicant_state='TX'" });
     if (!data.length) { console.log("No commitments data returned"); return; }
     const rows = data.map(d => ({
       frn:                  d.frn                  || null,
