@@ -244,7 +244,7 @@ app.get("/api/471s", requireAuth, async (req, res) => {
     if (state)        query = query.eq("state", state.toUpperCase());
     if (status)       query = query.ilike("application_status", `%${status}%`);
     if (service_type) query = query.ilike("service_type", `%${service_type}%`);
-    if (search)       query = query.or(`billed_entity_name.ilike.%${search}%,frn.ilike.%${search}%,billed_entity_number.ilike.%${search}%`);
+    if (search)       query = query.or(`organization_name.ilike.%${search}%,application_number.ilike.%${search}%`);
     const { data, error } = await query;
     if (error) throw error;
     res.json({ status: "success", data: data || [] });
