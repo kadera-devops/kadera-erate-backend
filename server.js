@@ -439,15 +439,47 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
-// ── TEMP: Entity search diagnostic ───────────────────────────────────────────
-app.get("/api/diag-entity", async (req, res) => {
+// ── GET /api/entity-search — live USAC entity search ─────────────────────────
+app.get("/api/entity-search", requireAuth, async (req, res) => {
   try {
-    const url  = `${USAC_BASE}/7i5i-83qf.json?$limit=2`;
-    const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
-    const data = await r.json();
-    res.json({ fields: Array.isArray(data) ? Object.keys(data[0] || {}) : [], sample: data });
+    const { search, ben, state, entity_type, limit = 50 } = req.query;
+    if (!search && !ben) return res.status(400).json({ status:"error", message:"Provide search or ben" });
+
+    const conditions = [];
+    if (ben)                      conditions.push(`entity_number='${ben.trim()}'`);
+    if (search)                   conditions.push(`upper(entity_name) like upper('%${search.trim()}%')`);
+    if (state && state !== "ALL") conditions.push(`upper(physical_state)='${state.toUpperCase()}'`);
+    if (entity_type)              conditions.push(`upper(entity_type) like upper('%${entity_type}%')`);
+
+    const where = conditions.join(" AND ");
+    const url   = `${USAC_BASE}/7i5i-83qf.json?$where=${encodeURIComponent(where)}&$limit=${Number(limit)}&$order=entity_name ASC`;
+    console.log("Entity search fetch:", url);
+    const r     = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const data  = await r.json();
+
+    if (!Array.isArray(data)) return res.json({ status:"error", message: data?.message || "Unexpected USAC response", raw: data });
+    if (data.length === 0)    return res.json({ status:"success", data:[] });
+
+    const results = data.map(d => ({
+      entity_name:      d.entity_name      || null,
+      entity_number:    d.entity_number    || null,
+      entity_type:      d.entity_type      || null,
+      status:           d.status           || null,
+      address:          d.physical_address || null,
+      city:             d.physical_city    || null,
+      county:           d.physical_county  || null,
+      state:            d.physical_state   || null,
+      zip:              d.physical_zipcode || null,
+      phone:            d.phone_number     || null,
+      latitude:         d.latitude         || null,
+      longitude:        d.longitude        || null,
+      last_updated:     d.last_updated_date || null,
+      raw:              d,
+    }));
+
+    res.json({ status:"success", data: results, count: results.length });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ status:"error", message: err.message });
   }
 });
 
