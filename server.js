@@ -575,22 +575,29 @@ app.get("/api/part-lookup", requireAuth, async (req, res) => {
     const { q, limit = 100 } = req.query;
     if (!q || q.trim().length < 2) return res.status(400).json({ status:"error", message:"query must be at least 2 characters" });
 
-    // Search line items by model, product name, or manufacturer
-    // Split query into tokens so "AP-635" matches "AP 635" and vice versa
-    const tokens = q.trim().split(/[\s\-\/,]+/).filter(t => t.length >= 2);
-    const orFilters = tokens.flatMap(t => [
-      `model_of_equipment.ilike.%${t}%`,
-      `form_471_product_name.ilike.%${t}%`,
-    ]).join(",");
-
-    const { data: lineItems, error } = await supabase
+    // Search the full string first — exact phrase match across model and product name
+    const qClean = q.trim();
+    let { data: lineItems, error } = await supabase
       .from("frn_line_items")
       .select("application_number, organization_name, model_of_equipment, form_471_manufacturer_name, form_471_product_name, form_471_function_name, price, one_time_quantity, monthly_quantity, pre_discount_extended_eligible_line_item_costs, funding_request_number")
-      .or(orFilters)
+      .or(`model_of_equipment.ilike.%${qClean}%,form_471_product_name.ilike.%${qClean}%`)
       .order("pre_discount_extended_eligible_line_item_costs", { ascending: false })
       .limit(500);
 
     if (error) throw error;
+
+    // If no results, try normalizing dashes/spaces (AP-635 → AP 635 and vice versa)
+    if (!lineItems || lineItems.length === 0) {
+      const qAlt = qClean.includes("-") ? qClean.replace(/-/g, " ") : qClean.replace(/\s+/g, "-");
+      const alt  = await supabase
+        .from("frn_line_items")
+        .select("application_number, organization_name, model_of_equipment, form_471_manufacturer_name, form_471_product_name, form_471_function_name, price, one_time_quantity, monthly_quantity, pre_discount_extended_eligible_line_item_costs, funding_request_number")
+        .or(`model_of_equipment.ilike.%${qAlt}%,form_471_product_name.ilike.%${qAlt}%`)
+        .order("pre_discount_extended_eligible_line_item_costs", { ascending: false })
+        .limit(500);
+      if (!alt.error) lineItems = alt.data || [];
+    }
+
     if (!lineItems || lineItems.length === 0) return res.json({ status:"success", data:[] });
 
     // Deduplicate — keep highest cost record per org+model combination
