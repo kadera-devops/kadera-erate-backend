@@ -605,7 +605,7 @@ app.get("/api/c2-prospects", requireAuth, async (req, res) => {
 
     // Step 1: Fetch TX schools + districts with available C2 budget from USAC live
     const typeFilter = `(upper(applicant_type) like upper('%School%') OR upper(applicant_type) like upper('%District%'))`;
-    const where = `state='TX' AND available_c2_budget_amount > ${Number(min_budget)} AND ${typeFilter}`;
+    const where = `state='TX' AND available_c2_budget_amount > ${Number(min_budget)} AND c2_budget_cycle='FY2026-2030' AND ${typeFilter}`;
     const url   = `${USAC_BASE}/6brt-5pbv.json?$where=${encodeURIComponent(where)}&$limit=5000&$order=available_c2_budget_amount DESC`;
     console.log("C2 prospects fetch:", url);
     const r     = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
@@ -614,7 +614,7 @@ app.get("/api/c2-prospects", requireAuth, async (req, res) => {
     if (!Array.isArray(c2data) || c2data.length === 0) return res.json({ status:"success", data:[], count:0 });
     console.log(`Fetched ${c2data.length} TX C2 records`);
 
-    // Step 2: Get all BENs from 470s filed in current FY from local DB
+    // Step 2: Get all BENs from FY2026 470s in local DB
     const { data: filedBens } = await supabase
       .from("form_470s")
       .select("billed_entity_number")
@@ -623,22 +623,58 @@ app.get("/api/c2-prospects", requireAuth, async (req, res) => {
     const filedSet = new Set((filedBens || []).map(r => String(r.billed_entity_number).trim()).filter(Boolean));
     console.log(`Found ${filedSet.size} BENs with FY${CURRENT_FY} 470s`);
 
-    // Step 3: Filter out entities that already filed a 470
-    const prospects = c2data
-      .filter(d => d.ben && !filedSet.has(String(d.ben).trim()))
+    // Step 3: Filter to prospects only (no FY2026 470)
+    const prospectData = c2data.filter(d => d.ben && !filedSet.has(String(d.ben).trim()));
+
+    // Step 4: Get last 470 date for each prospect from USAC API (most recent prior filing)
+    // Batch BENs into a single query — use OR of up to 100 BENs to avoid URL length limits
+    const prospectBens = prospectData.slice(0, Number(limit)).map(d => d.ben);
+    const lastFiledMap = {};
+
+    if (prospectBens.length > 0) {
+      const batchSize = 50;
+      for (let i = 0; i < prospectBens.length; i += batchSize) {
+        const batch    = prospectBens.slice(i, i + batchSize);
+        const benList  = batch.map(b => `'${b}'`).join(",");
+        const h470url  = `${USAC_BASE}/jt8s-3q52.json?$where=${encodeURIComponent(`billed_entity_number IN(${benList}) AND billed_entity_state='TX'`)}&$select=billed_entity_number,certified_date_time,funding_year&$order=certified_date_time DESC&$limit=${batchSize * 10}`;
+        try {
+          const h470r   = await fetch(h470url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+          const h470data = await h470r.json();
+          if (Array.isArray(h470data)) {
+            for (const row of h470data) {
+              const ben = String(row.billed_entity_number).trim();
+              if (!lastFiledMap[ben] && row.certified_date_time) {
+                lastFiledMap[ben] = { date: row.certified_date_time, year: row.funding_year };
+              }
+            }
+          }
+        } catch (e) { console.error("History batch error:", e.message); }
+      }
+      console.log(`Got last-filed data for ${Object.keys(lastFiledMap).length} prospects`);
+    }
+
+    const now = new Date();
+    const prospects = prospectData
       .slice(0, Number(limit))
-      .map(d => ({
-        ben:            d.ben,
-        entity_name:    d.billed_entity_name         || null,
-        city:           d.city                       || null,
-        applicant_type: d.applicant_type             || null,
-        budget_cycle:   d.c2_budget_cycle            || null,
-        total_budget:   parseFloat(d.c2_budget)      || null,
-        funded:         parseFloat(d.funded_c2_budget_amount)    || null,
-        available:      parseFloat(d.available_c2_budget_amount) || null,
-        students:       d.full_time_students         || null,
-        consulting_firm: d.consulting_firm_name_crn  || null,
-      }));
+      .map(d => {
+        const last = lastFiledMap[String(d.ben).trim()];
+        const daysSince = last?.date ? Math.floor((now - new Date(last.date)) / (1000*60*60*24)) : null;
+        return {
+          ben:              d.ben,
+          entity_name:      d.billed_entity_name         || null,
+          city:             d.city                       || null,
+          applicant_type:   d.applicant_type             || null,
+          budget_cycle:     d.c2_budget_cycle            || null,
+          total_budget:     parseFloat(d.c2_budget)      || null,
+          funded:           parseFloat(d.funded_c2_budget_amount)    || null,
+          available:        parseFloat(d.available_c2_budget_amount) || null,
+          students:         d.full_time_students         || null,
+          consulting_firm:  d.consulting_firm_name_crn   || null,
+          last_470_date:    last?.date                   || null,
+          last_470_year:    last?.year                   || null,
+          days_since_470:   daysSince,
+        };
+      });
 
     res.json({ status:"success", data: prospects, count: prospects.length, total_c2_checked: c2data.length, already_filed: filedSet.size });
   } catch (err) {
@@ -657,10 +693,12 @@ app.get("/api/c2-budget", requireAuth, async (req, res) => {
     if (!search && !ben) return res.status(400).json({ status:"error", message:"Provide search or ben" });
 
     // Build $where clause — use direct string concat to avoid URLSearchParams double-encoding
+    const { cycle = "FY2026-2030" } = req.query;
     const conditions = [];
     if (ben)                          conditions.push(`ben='${ben.trim()}'`);
     if (search)                       conditions.push(`upper(billed_entity_name) like upper('%${search.trim()}%')`);
     if (state && state !== "ALL")     conditions.push(`upper(state)='${state.toUpperCase()}'`);
+    if (cycle)                        conditions.push(`c2_budget_cycle='${cycle}'`);
 
     const where  = conditions.join(" AND ");
     const url    = `${USAC_BASE}/6brt-5pbv.json?$where=${encodeURIComponent(where)}&$limit=${Number(limit)}&$order=billed_entity_name ASC`;
