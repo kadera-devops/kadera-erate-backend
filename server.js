@@ -439,6 +439,49 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/entity-history — full E-Rate commitment history for a BEN ────────
+app.get("/api/entity-history", requireAuth, async (req, res) => {
+  try {
+    const { ben } = req.query;
+    if (!ben) return res.status(400).json({ status:"error", message:"ben required" });
+
+    // Query USAC commitments API live across all funding years
+    const where = `ben='${ben.trim()}'`;
+    const url   = `${USAC_BASE}/srbr-2d59.json?$where=${encodeURIComponent(where)}&$limit=500&$order=funding_year DESC`;
+    console.log("Entity history fetch:", url);
+    const r     = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const data  = await r.json();
+
+    if (!Array.isArray(data)) return res.json({ status:"error", message: data?.message || "Unexpected response", raw: data });
+    if (data.length === 0)    return res.json({ status:"success", data:[], summary:[] });
+
+    const results = data.map(d => ({
+      funding_year:     d.funding_year                  || null,
+      frn:              d.funding_request_number        || null,
+      service_type:     d.form_471_service_type_name    || null,
+      frn_status:       d.form_471_frn_status_name      || null,
+      commitment:       parseFloat(d.funding_commitment_request) || null,
+      discount_pct:     d.dis_pct ? Math.round(parseFloat(d.dis_pct) * 100) : null,
+      spin_name:        d.spin_name                     || null,
+      fcdl_date:        d.fcdl_letter_date              || null,
+    }));
+
+    // Summary by year
+    const yearMap = {};
+    for (const r of results) {
+      const y = r.funding_year || "Unknown";
+      if (!yearMap[y]) yearMap[y] = { year: y, total: 0, count: 0 };
+      yearMap[y].total += r.commitment || 0;
+      yearMap[y].count++;
+    }
+    const summary = Object.values(yearMap).sort((a,b) => b.year - a.year).map(y => ({ ...y, total: Math.round(y.total) }));
+
+    res.json({ status:"success", data: results, summary, count: results.length });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/entity-search — live USAC entity search ─────────────────────────
 app.get("/api/entity-search", requireAuth, async (req, res) => {
   try {
