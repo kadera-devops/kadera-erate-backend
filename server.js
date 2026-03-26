@@ -514,14 +514,15 @@ app.get("/api/entity-history", requireAuth, async (req, res) => {
     if (data.length === 0)    return res.json({ status:"success", data:[], summary:[] });
 
     const results = data.map(d => ({
-      funding_year:     d.funding_year                  || null,
-      frn:              d.funding_request_number        || null,
-      service_type:     d.form_471_service_type_name    || null,
-      frn_status:       d.form_471_frn_status_name      || null,
-      commitment:       parseFloat(d.funding_commitment_request) || null,
-      discount_pct:     d.dis_pct ? Math.round(parseFloat(d.dis_pct) * 100) : null,
-      spin_name:        d.spin_name                     || null,
-      fcdl_date:        d.fcdl_letter_date              || null,
+      funding_year:       d.funding_year                  || null,
+      application_number: d.application_number            || null,
+      frn:                d.funding_request_number        || null,
+      service_type:       d.form_471_service_type_name    || null,
+      frn_status:         d.form_471_frn_status_name      || null,
+      commitment:         parseFloat(d.funding_commitment_request) || null,
+      discount_pct:       d.dis_pct ? Math.round(parseFloat(d.dis_pct) * 100) : null,
+      spin_name:          d.spin_name                     || null,
+      fcdl_date:          d.fcdl_letter_date              || null,
     }));
 
     // Summary by year
