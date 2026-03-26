@@ -439,6 +439,18 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
+// ── TEMP: Entity search diagnostic ───────────────────────────────────────────
+app.get("/api/diag-entity", async (req, res) => {
+  try {
+    const url  = `${USAC_BASE}/7i5i-83qf.json?$limit=2`;
+    const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const data = await r.json();
+    res.json({ fields: Array.isArray(data) ? Object.keys(data[0] || {}) : [], sample: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── TEMP: C2 budget raw diagnostic ───────────────────────────────────────────
 app.get("/api/diag-c2", async (req, res) => {
   try {
