@@ -439,6 +439,64 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/471-detail — fetch 471 details for a BEN + funding year ────────
+app.get("/api/471-detail", requireAuth, async (req, res) => {
+  try {
+    const { ben, funding_year, application_number } = req.query;
+    if (!ben && !application_number) return res.status(400).json({ status:"error", message:"Provide ben or application_number" });
+
+    let form471 = null;
+
+    // Try local DB first (FY2026)
+    if (application_number) {
+      const { data } = await supabase.from("form_471s").select("*")
+        .eq("application_number", application_number).limit(1);
+      if (data && data.length > 0) form471 = data[0];
+    }
+
+    // If not found locally, query USAC API live
+    if (!form471) {
+      const conditions = [];
+      if (ben)              conditions.push(`ben='${ben.trim()}'`);
+      if (funding_year)     conditions.push(`funding_year='${funding_year}'`);
+      if (application_number) conditions.push(`application_number='${application_number}'`);
+      const where = conditions.join(" AND ");
+      const url   = `${USAC_BASE}/9s6i-myen.json?$where=${encodeURIComponent(where)}&$limit=5&$order=certified_datetime DESC`;
+      console.log("471 detail fetch:", url);
+      const r     = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+      const data  = await r.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const d = data[0];
+        form471 = {
+          application_number:         d.application_number          || null,
+          funding_year:               d.funding_year                || null,
+          organization_name:          d.organization_name           || null,
+          org_state:                  d.org_state                   || null,
+          chosen_category_of_service: d.chosen_category_of_service  || null,
+          form_471_status_name:       d.form_471_status_name        || null,
+          funding_request_amount:     parseFloat(d.funding_request_amount) || null,
+          pre_discount_eligible_amount: parseFloat(d.pre_discount_eligible_amount) || null,
+          c1_discount:                d.c1_discount                 || null,
+          c2_discount:                d.c2_discount                 || null,
+          cnct_first_name:            d.cnct_first_name             || null,
+          cnct_last_name:             d.cnct_last_name              || null,
+          cnct_email:                 d.cnct_email                  || null,
+          cnct_phone:                 d.cnct_phone                  || null,
+          certified_datetime:         d.certified_datetime          || null,
+          source:                     "usac_live",
+        };
+      }
+    } else {
+      form471.source = "local_db";
+    }
+
+    if (!form471) return res.json({ status:"success", data: null });
+    res.json({ status:"success", data: form471 });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/entity-history — full E-Rate commitment history for a BEN ────────
 app.get("/api/entity-history", requireAuth, async (req, res) => {
   try {
