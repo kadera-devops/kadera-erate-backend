@@ -313,9 +313,9 @@ app.get("/api/471s", requireAuth, async (req, res) => {
   try {
     const { state, status, service_type, search, limit = 100, offset = 0 } = req.query;
     let query = supabase.from("form_471s").select("*").order("certified_datetime", { ascending: false }).range(Number(offset), Number(offset) + Number(limit) - 1);
-    if (state)        query = query.eq("state", state.toUpperCase());
-    if (status)       query = query.ilike("application_status", `%${status}%`);
-    if (service_type) query = query.ilike("service_type", `%${service_type}%`);
+    if (state)        query = query.eq("org_state", state.toUpperCase());
+    if (status)       query = query.ilike("form_471_status_name", `%${status}%`);
+    if (service_type) query = query.ilike("chosen_category_of_service", `%${service_type}%`);
     if (search)       query = query.or(`organization_name.ilike.%${search}%,application_number.ilike.%${search}%`);
     const { data, error } = await query;
     if (error) throw error;
