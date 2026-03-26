@@ -439,6 +439,19 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
+// ── TEMP: C2 budget raw diagnostic ───────────────────────────────────────────
+app.get("/api/diag-c2", async (req, res) => {
+  try {
+    // Fetch 2 raw records with no filters to see actual field names
+    const url  = `${USAC_BASE}/6brt-5pbv.json?$limit=2`;
+    const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const data = await r.json();
+    res.json({ fields: Array.isArray(data) ? Object.keys(data[0] || {}) : [], sample: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/c2-budget — live query USAC C2 budget dataset ──────────────────
 app.get("/api/c2-budget", requireAuth, async (req, res) => {
   try {
