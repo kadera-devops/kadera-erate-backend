@@ -453,38 +453,47 @@ app.get("/api/diag-c2", async (req, res) => {
 });
 
 // ── GET /api/c2-budget — live query USAC C2 budget dataset ──────────────────
+// Fields confirmed: ben, billed_entity_name, city, state, applicant_type,
+//   c2_budget_cycle, c2_budget, c2_budget_version, funded_c2_budget_amount,
+//   pending_c2_budget_amount, available_c2_budget_amount, full_time_students,
+//   school_student_multiplier, library_square_footage, library_multiplier
 app.get("/api/c2-budget", requireAuth, async (req, res) => {
   try {
     const { search, ben, state, limit = 50 } = req.query;
-    if (!search && !ben && !state) return res.status(400).json({ status:"error", message:"Provide search, ben, or state" });
+    if (!search && !ben) return res.status(400).json({ status:"error", message:"Provide search or ben" });
 
-    const params = new URLSearchParams({ "$limit": Number(limit) });
-    if (ben)    params.set("billed_entity_number", ben.trim());
-    if (state && state !== "ALL") params.set("state", state.toUpperCase());
-    if (search) params.set("$where", `upper(billed_entity_name) like upper('%25${search.trim()}%25')`);
+    // Build $where clause — use direct string concat to avoid URLSearchParams double-encoding
+    const conditions = [];
+    if (ben)                          conditions.push(`ben='${ben.trim()}'`);
+    if (search)                       conditions.push(`upper(billed_entity_name) like upper('%${search.trim()}%')`);
+    if (state && state !== "ALL")     conditions.push(`upper(state)='${state.toUpperCase()}'`);
 
-    const url  = `${USAC_BASE}/6brt-5pbv.json?${params}`;
+    const where  = conditions.join(" AND ");
+    const url    = `${USAC_BASE}/6brt-5pbv.json?$where=${encodeURIComponent(where)}&$limit=${Number(limit)}&$order=billed_entity_name ASC`;
     console.log("C2 Budget fetch:", url);
-    const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
-    const data = await r.json();
+    const r      = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const data   = await r.json();
 
-    if (!Array.isArray(data)) return res.json({ status:"error", message: data?.message || "Unexpected response", raw: data });
+    if (!Array.isArray(data)) return res.json({ status:"error", message: data?.message || "Unexpected USAC response", raw: data });
+    if (data.length === 0)    return res.json({ status:"success", data:[], fields:[] });
 
-    // Map to clean fields — discover actual keys from first record
-    if (data.length === 0) return res.json({ status:"success", data:[], fields:[] });
-
-    const fields = Object.keys(data[0]);
+    const fields  = Object.keys(data[0]);
     const results = data.map(d => ({
-      ben:               d.billed_entity_number || d.ben || null,
-      entity_name:       d.billed_entity_name   || null,
-      state:             d.state                || null,
-      entity_type:       d.entity_type          || d.applicant_type || null,
-      budget_cycle:      d.budget_cycle         || null,
-      total_budget:      parseFloat(d.total_c2_budget || d.c2_budget || d.total_budget || 0) || null,
-      committed:         parseFloat(d.c2_committed   || d.committed  || 0) || null,
-      disbursed:         parseFloat(d.c2_disbursed   || d.disbursed  || 0) || null,
-      remaining:         parseFloat(d.remaining_c2_budget || d.remaining || 0) || null,
-      budget_version:    d.budget_version       || null,
+      ben:               d.ben                        || null,
+      entity_name:       d.billed_entity_name         || null,
+      city:              d.city                       || null,
+      state:             d.state                      || null,
+      applicant_type:    d.applicant_type             || null,
+      budget_cycle:      d.c2_budget_cycle            || null,
+      budget_version:    d.c2_budget_version          || null,
+      total_budget:      parseFloat(d.c2_budget)      || null,
+      funded:            parseFloat(d.funded_c2_budget_amount)    || null,
+      pending:           parseFloat(d.pending_c2_budget_amount)   || null,
+      available:         parseFloat(d.available_c2_budget_amount) || null,
+      students:          d.full_time_students         || null,
+      multiplier:        d.school_student_multiplier  || d.library_multiplier || null,
+      sq_footage:        d.library_square_footage     || null,
+      consulting_firm:   d.consulting_firm_name_crn   || null,
       raw:               d,
     }));
 
