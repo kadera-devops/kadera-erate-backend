@@ -598,6 +598,54 @@ app.get("/api/diag-c2", async (req, res) => {
   }
 });
 
+// ── GET /api/c2-prospects — TX schools/districts with C2 budget but no FY2026 470
+app.get("/api/c2-prospects", requireAuth, async (req, res) => {
+  try {
+    const { min_budget = 0, limit = 200 } = req.query;
+
+    // Step 1: Fetch TX schools + districts with available C2 budget from USAC live
+    const typeFilter = `(upper(applicant_type) like upper('%School%') OR upper(applicant_type) like upper('%District%'))`;
+    const where = `state='TX' AND available_c2_budget_amount > ${Number(min_budget)} AND ${typeFilter}`;
+    const url   = `${USAC_BASE}/6brt-5pbv.json?$where=${encodeURIComponent(where)}&$limit=5000&$order=available_c2_budget_amount DESC`;
+    console.log("C2 prospects fetch:", url);
+    const r     = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const c2data = await r.json();
+
+    if (!Array.isArray(c2data) || c2data.length === 0) return res.json({ status:"success", data:[], count:0 });
+    console.log(`Fetched ${c2data.length} TX C2 records`);
+
+    // Step 2: Get all BENs from 470s filed in current FY from local DB
+    const { data: filedBens } = await supabase
+      .from("form_470s")
+      .select("billed_entity_number")
+      .eq("funding_year", CURRENT_FY);
+
+    const filedSet = new Set((filedBens || []).map(r => String(r.billed_entity_number).trim()).filter(Boolean));
+    console.log(`Found ${filedSet.size} BENs with FY${CURRENT_FY} 470s`);
+
+    // Step 3: Filter out entities that already filed a 470
+    const prospects = c2data
+      .filter(d => d.ben && !filedSet.has(String(d.ben).trim()))
+      .slice(0, Number(limit))
+      .map(d => ({
+        ben:            d.ben,
+        entity_name:    d.billed_entity_name         || null,
+        city:           d.city                       || null,
+        applicant_type: d.applicant_type             || null,
+        budget_cycle:   d.c2_budget_cycle            || null,
+        total_budget:   parseFloat(d.c2_budget)      || null,
+        funded:         parseFloat(d.funded_c2_budget_amount)    || null,
+        available:      parseFloat(d.available_c2_budget_amount) || null,
+        students:       d.full_time_students         || null,
+        consulting_firm: d.consulting_firm_name_crn  || null,
+      }));
+
+    res.json({ status:"success", data: prospects, count: prospects.length, total_c2_checked: c2data.length, already_filed: filedSet.size });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/c2-budget — live query USAC C2 budget dataset ──────────────────
 // Fields confirmed: ben, billed_entity_name, city, state, applicant_type,
 //   c2_budget_cycle, c2_budget, c2_budget_version, funded_c2_budget_amount,
