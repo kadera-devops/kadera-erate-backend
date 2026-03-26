@@ -312,7 +312,7 @@ app.get("/api/470s", requireAuth, async (req, res) => {
 app.get("/api/471s", requireAuth, async (req, res) => {
   try {
     const { state, status, service_type, search, limit = 100, offset = 0 } = req.query;
-    let query = supabase.from("form_471s").select("*").order("date_filed", { ascending: false }).range(Number(offset), Number(offset) + Number(limit) - 1);
+    let query = supabase.from("form_471s").select("*").order("certified_datetime", { ascending: false, nullsFirst: false }).range(Number(offset), Number(offset) + Number(limit) - 1);
     if (state)        query = query.eq("state", state.toUpperCase());
     if (status)       query = query.ilike("application_status", `%${status}%`);
     if (service_type) query = query.ilike("service_type", `%${service_type}%`);
@@ -329,7 +329,7 @@ app.get("/api/471s", requireAuth, async (req, res) => {
 app.get("/api/commitments", requireAuth, async (req, res) => {
   try {
     const { state, status, service_type, search, limit = 100, offset = 0 } = req.query;
-    let query = supabase.from("commitments").select("*").order("commitment_date", { ascending: false }).range(Number(offset), Number(offset) + Number(limit) - 1);
+    let query = supabase.from("commitments").select("*").order("fcdl_letter_date", { ascending: false, nullsFirst: false }).range(Number(offset), Number(offset) + Number(limit) - 1);
     if (state)        query = query.eq("state", state.toUpperCase());
     if (status)       query = query.ilike("status", `%${status}%`);
     if (service_type) query = query.ilike("service_type", `%${service_type}%`);
