@@ -211,6 +211,8 @@ async function syncLineItems() {
         form_471_function_name:                      d.form_471_function_name                      || null,
         form_471_purpose_name:                       d.form_471_purpose_name                       || null,
         price:                                       parseFloat(d.price)                           || null,
+        one_time_quantity:                           parseFloat(d.one_time_quantity)               || null,
+        monthly_quantity:                            parseFloat(d.monthly_quantity)                || null,
         pre_discount_extended_eligible_line_item_costs: parseFloat(d.pre_discount_extended_eligible_line_item_costs) || null,
       });
     }
@@ -576,7 +578,7 @@ app.get("/api/part-lookup", requireAuth, async (req, res) => {
     // Search line items by model, product name, or manufacturer
     const { data: lineItems, error } = await supabase
       .from("frn_line_items")
-      .select("application_number, organization_name, model_of_equipment, form_471_manufacturer_name, form_471_product_name, form_471_function_name, price, pre_discount_extended_eligible_line_item_costs, funding_request_number")
+      .select("application_number, organization_name, model_of_equipment, form_471_manufacturer_name, form_471_product_name, form_471_function_name, price, one_time_quantity, monthly_quantity, pre_discount_extended_eligible_line_item_costs, funding_request_number")
       .or(`model_of_equipment.ilike.%${q.trim()}%,form_471_product_name.ilike.%${q.trim()}%,form_471_manufacturer_name.ilike.%${q.trim()}%`)
       .order("pre_discount_extended_eligible_line_item_costs", { ascending: false })
       .limit(Number(limit));
@@ -603,7 +605,14 @@ app.get("/api/part-lookup", requireAuth, async (req, res) => {
       manufacturer:         r.form_471_manufacturer_name,
       product_name:         r.form_471_product_name,
       function_name:        r.form_471_function_name,
-      unit_price:           parseFloat(r.price) || null,
+      unit_price: (() => {
+        const p    = parseFloat(r.price);
+        if (p) return p;
+        const qty  = parseFloat(r.one_time_quantity) || parseFloat(r.monthly_quantity);
+        const tot  = parseFloat(r.pre_discount_extended_eligible_line_item_costs);
+        return (qty && tot) ? tot / qty : null;
+      })(),
+      quantity:             parseFloat(r.one_time_quantity) || parseFloat(r.monthly_quantity) || null,
       total_cost:           parseFloat(r.pre_discount_extended_eligible_line_item_costs) || null,
       spin_name:            spinMap[r.application_number] || null,
     }));
