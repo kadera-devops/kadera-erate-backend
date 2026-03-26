@@ -439,6 +439,48 @@ app.delete("/api/tags/:appNumber", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/c2-budget — live query USAC C2 budget dataset ──────────────────
+app.get("/api/c2-budget", requireAuth, async (req, res) => {
+  try {
+    const { search, ben, state, limit = 50 } = req.query;
+    if (!search && !ben && !state) return res.status(400).json({ status:"error", message:"Provide search, ben, or state" });
+
+    const params = new URLSearchParams({ "$limit": Number(limit) });
+    if (ben)    params.set("billed_entity_number", ben.trim());
+    if (state && state !== "ALL") params.set("state", state.toUpperCase());
+    if (search) params.set("$where", `upper(billed_entity_name) like upper('%25${search.trim()}%25')`);
+
+    const url  = `${USAC_BASE}/6brt-5pbv.json?${params}`;
+    console.log("C2 Budget fetch:", url);
+    const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const data = await r.json();
+
+    if (!Array.isArray(data)) return res.json({ status:"error", message: data?.message || "Unexpected response", raw: data });
+
+    // Map to clean fields — discover actual keys from first record
+    if (data.length === 0) return res.json({ status:"success", data:[], fields:[] });
+
+    const fields = Object.keys(data[0]);
+    const results = data.map(d => ({
+      ben:               d.billed_entity_number || d.ben || null,
+      entity_name:       d.billed_entity_name   || null,
+      state:             d.state                || null,
+      entity_type:       d.entity_type          || d.applicant_type || null,
+      budget_cycle:      d.budget_cycle         || null,
+      total_budget:      parseFloat(d.total_c2_budget || d.c2_budget || d.total_budget || 0) || null,
+      committed:         parseFloat(d.c2_committed   || d.committed  || 0) || null,
+      disbursed:         parseFloat(d.c2_disbursed   || d.disbursed  || 0) || null,
+      remaining:         parseFloat(d.remaining_c2_budget || d.remaining || 0) || null,
+      budget_version:    d.budget_version       || null,
+      raw:               d,
+    }));
+
+    res.json({ status:"success", data: results, fields, count: results.length });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/frn-status — FRN status lookup from commitments ─────────────────
 app.get("/api/frn-status", requireAuth, async (req, res) => {
   try {
