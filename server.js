@@ -576,15 +576,36 @@ app.get("/api/part-lookup", requireAuth, async (req, res) => {
     if (!q || q.trim().length < 2) return res.status(400).json({ status:"error", message:"query must be at least 2 characters" });
 
     // Search line items by model, product name, or manufacturer
+    // Split query into tokens so "AP-635" matches "AP 635" and vice versa
+    const tokens = q.trim().split(/[\s\-\/,]+/).filter(t => t.length >= 2);
+    const orFilters = tokens.flatMap(t => [
+      `model_of_equipment.ilike.%${t}%`,
+      `form_471_product_name.ilike.%${t}%`,
+    ]).join(",");
+
     const { data: lineItems, error } = await supabase
       .from("frn_line_items")
       .select("application_number, organization_name, model_of_equipment, form_471_manufacturer_name, form_471_product_name, form_471_function_name, price, one_time_quantity, monthly_quantity, pre_discount_extended_eligible_line_item_costs, funding_request_number")
-      .or(`model_of_equipment.ilike.%${q.trim()}%,form_471_product_name.ilike.%${q.trim()}%,form_471_manufacturer_name.ilike.%${q.trim()}%`)
+      .or(orFilters)
       .order("pre_discount_extended_eligible_line_item_costs", { ascending: false })
-      .limit(Number(limit));
+      .limit(500);
 
     if (error) throw error;
     if (!lineItems || lineItems.length === 0) return res.json({ status:"success", data:[] });
+
+    // Deduplicate — keep highest cost record per org+model combination
+    const seen = new Map();
+    for (const r of lineItems) {
+      const key = `${r.organization_name}|${r.model_of_equipment}`;
+      const cur = seen.get(key);
+      const cost = parseFloat(r.pre_discount_extended_eligible_line_item_costs) || 0;
+      if (!cur || cost > (parseFloat(cur.pre_discount_extended_eligible_line_item_costs) || 0)) {
+        seen.set(key, r);
+      }
+    }
+    const deduped = Array.from(seen.values())
+      .sort((a,b) => (parseFloat(b.pre_discount_extended_eligible_line_item_costs)||0) - (parseFloat(a.pre_discount_extended_eligible_line_item_costs)||0))
+      .slice(0, Number(limit));
 
     // Fetch spin_names for all unique application numbers
     const appNums = [...new Set(lineItems.map(r => r.application_number).filter(Boolean))];
