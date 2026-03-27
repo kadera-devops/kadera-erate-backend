@@ -851,25 +851,27 @@ app.get("/api/service-area-search", requireAuth, async (req, res) => {
     const svcKey    = service_type || "c2";
     const svcFilter = SERVICE_FILTERS[svcKey] || null;
 
+    // Build combined filter — area matches organization_name OR spin_name
+    const areaClean = area.trim();
+    const areaFilter = `organization_name.ilike.%${areaClean}%,spin_name.ilike.%${areaClean}%`;
+
     let query = supabase
       .from("commitments")
       .select("spin_name, organization_name, ben, application_number, funding_year, form_471_service_type_name, form_471_frn_status_name, funding_commitment_request, dis_pct, fcdl_letter_date")
-      .ilike("organization_name", `%${area.trim()}%`)
+      .or(areaFilter)
       .order("funding_commitment_request", { ascending: false })
       .limit(Number(limit));
 
+    // Apply service type filter after area filter
     if (Array.isArray(svcFilter)) {
       query = query.or(svcFilter.map(s => `form_471_service_type_name.ilike.%${s}%`).join(","));
     } else if (svcFilter) {
       query = query.ilike("form_471_service_type_name", `%${svcFilter}%`);
     }
 
-    // Additional free-text keyword filter on service type
-    if (service_keyword && service_keyword.trim().length > 0) {
-      query = query.ilike("form_471_service_type_name", `%${service_keyword.trim()}%`);
-    }
-
+    console.log(`Service area search: area="${areaClean}" svc="${svcKey}"`);
     const { data, error } = await query;
+    console.log(`Service area results: ${(data||[]).length} rows, error: ${error?.message}`);
     if (error) throw error;
 
     const rows = (data || []).map(r => ({
