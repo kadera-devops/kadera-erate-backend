@@ -836,6 +836,71 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/service-area-search — providers doing C2/cabling in an area ───────
+app.get("/api/service-area-search", requireAuth, async (req, res) => {
+  try {
+    const { area, service_type, limit = 200 } = req.query;
+    if (!area || area.trim().length < 2) return res.status(400).json({ status:"error", message:"area query required" });
+
+    // Service type filter
+    const SERVICE_FILTERS = {
+      "internal":  "Internal Connections",
+      "c2":        ["Internal Connections", "Basic Maintenance"],
+      "all":       null,
+    };
+    const svcKey    = service_type || "c2";
+    const svcFilter = SERVICE_FILTERS[svcKey] || null;
+
+    let query = supabase
+      .from("commitments")
+      .select("spin_name, organization_name, ben, application_number, funding_year, form_471_service_type_name, form_471_frn_status_name, funding_commitment_request, dis_pct, fcdl_letter_date")
+      .ilike("organization_name", `%${area.trim()}%`)
+      .order("funding_commitment_request", { ascending: false })
+      .limit(Number(limit));
+
+    if (Array.isArray(svcFilter)) {
+      query = query.or(svcFilter.map(s => `form_471_service_type_name.ilike.%${s}%`).join(","));
+    } else if (svcFilter) {
+      query = query.ilike("form_471_service_type_name", `%${svcFilter}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const rows = (data || []).map(r => ({
+      spin_name:          r.spin_name,
+      organization:       r.organization_name,
+      ben:                r.ben,
+      application_number: r.application_number,
+      funding_year:       r.funding_year,
+      service_type:       r.form_471_service_type_name,
+      frn_status:         r.form_471_frn_status_name,
+      commitment:         parseFloat(r.funding_commitment_request) || null,
+      discount_pct:       r.dis_pct ? Math.round(parseFloat(r.dis_pct) * 100) : null,
+      fcdl_date:          r.fcdl_letter_date,
+    }));
+
+    // Provider summary — who has won the most work in this area
+    const providerMap = {};
+    for (const r of rows) {
+      const key = r.spin_name || "Unknown";
+      if (!providerMap[key]) providerMap[key] = { spin_name: key, count: 0, total: 0, orgs: new Set() };
+      providerMap[key].count++;
+      providerMap[key].total += r.commitment || 0;
+      if (r.organization) providerMap[key].orgs.add(r.organization);
+    }
+    const providerSummary = Object.values(providerMap)
+      .map(p => ({ spin_name: p.spin_name, count: p.count, total: Math.round(p.total), orgs: p.orgs.size }))
+      .sort((a,b) => b.total - a.total);
+
+    const totalCommitted = rows.reduce((s,r) => s + (r.commitment||0), 0);
+
+    res.json({ status:"success", data: rows, providerSummary, count: rows.length, total_committed: Math.round(totalCommitted) });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/provider-search — full commitment detail for a service provider ──
 app.get("/api/provider-search", requireAuth, async (req, res) => {
   try {
