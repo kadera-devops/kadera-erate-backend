@@ -836,6 +836,45 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /api/provider-search — full commitment detail for a service provider ──
+app.get("/api/provider-search", requireAuth, async (req, res) => {
+  try {
+    const { q, limit = 200 } = req.query;
+    if (!q || q.trim().length < 2) return res.status(400).json({ status:"error", message:"query must be at least 2 characters" });
+
+    const { data, error } = await supabase
+      .from("commitments")
+      .select("spin_name, organization_name, ben, application_number, funding_year, form_471_service_type_name, form_471_frn_status_name, funding_commitment_request, dis_pct, fcdl_letter_date")
+      .ilike("spin_name", `%${q.trim()}%`)
+      .order("funding_commitment_request", { ascending: false })
+      .limit(Number(limit));
+
+    if (error) throw error;
+
+    const rows = (data || []).map(r => ({
+      spin_name:       r.spin_name,
+      organization:    r.organization_name,
+      ben:             r.ben,
+      application_number: r.application_number,
+      funding_year:    r.funding_year,
+      service_type:    r.form_471_service_type_name,
+      frn_status:      r.form_471_frn_status_name,
+      commitment:      parseFloat(r.funding_commitment_request) || null,
+      discount_pct:    r.dis_pct ? Math.round(parseFloat(r.dis_pct) * 100) : null,
+      fcdl_date:       r.fcdl_letter_date,
+    }));
+
+    // Summary stats
+    const total     = rows.reduce((s,r) => s + (r.commitment||0), 0);
+    const providers = [...new Set(rows.map(r => r.spin_name).filter(Boolean))];
+    const orgs      = [...new Set(rows.map(r => r.organization).filter(Boolean))];
+
+    res.json({ status:"success", data: rows, count: rows.length, total_committed: Math.round(total), unique_providers: providers.length, unique_orgs: orgs.length });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
 // ── GET /api/provider-applicants — applicants for a given SPIN ───────────────
 app.get("/api/provider-applicants", requireAuth, async (req, res) => {
   try {
