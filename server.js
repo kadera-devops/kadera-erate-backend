@@ -839,7 +839,7 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
 // ── GET /api/service-area-search — providers doing C2/cabling in an area ───────
 app.get("/api/service-area-search", requireAuth, async (req, res) => {
   try {
-    const { area, service_type, limit = 200 } = req.query;
+    const { area, service_type, service_keyword, limit = 200 } = req.query;
     if (!area || area.trim().length < 2) return res.status(400).json({ status:"error", message:"area query required" });
 
     // Service type filter
@@ -862,6 +862,11 @@ app.get("/api/service-area-search", requireAuth, async (req, res) => {
       query = query.or(svcFilter.map(s => `form_471_service_type_name.ilike.%${s}%`).join(","));
     } else if (svcFilter) {
       query = query.ilike("form_471_service_type_name", `%${svcFilter}%`);
+    }
+
+    // Additional free-text keyword filter on service type
+    if (service_keyword && service_keyword.trim().length > 0) {
+      query = query.ilike("form_471_service_type_name", `%${service_keyword.trim()}%`);
     }
 
     const { data, error } = await query;
