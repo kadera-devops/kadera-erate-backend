@@ -585,19 +585,101 @@ app.get("/api/entity-search", requireAuth, async (req, res) => {
   }
 });
 
-// ── TEMP: 470 detail diagnostic ──────────────────────────────────────────────
-app.get("/api/diag-470-detail", async (req, res) => {
+// ── GET /api/470-detail — full 470 detail for a single application ───────────
+app.get("/api/470-detail", requireAuth, async (req, res) => {
   try {
     const { app_num } = req.query;
-    const where = app_num ? `application_number='${app_num}'` : `billed_entity_state='TX' AND funding_year='2026'`;
-    const url = `${USAC_BASE}/jt8s-3q52.json?$where=${encodeURIComponent(where)}&$limit=1`;
-    const r   = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
-    const data = await r.json();
-    // Also check for RFP documents dataset
-    const docUrl = `https://opendata.usac.org/resource/7i5i-83qf.json?$limit=1`;
-    res.json({ fields: Array.isArray(data) ? Object.keys(data[0] || {}) : [], sample: data[0] || {}, note: "Check fields for rfp, document, attachment, or url" });
+    if (!app_num) return res.status(400).json({ status:"error", message:"app_num required" });
+
+    // Try local DB first (has raw field with all USAC data)
+    const { data: local } = await supabase
+      .from("form_470s")
+      .select("*")
+      .eq("application_number", app_num)
+      .limit(1);
+
+    if (local && local.length > 0) {
+      const row = local[0];
+      const raw = row.raw || {};
+      return res.json({
+        status: "success",
+        source: "local",
+        data: {
+          application_number:   row.application_number,
+          funding_year:         row.funding_year,
+          billed_entity_name:   row.billed_entity_name,
+          billed_entity_number: row.billed_entity_number,
+          state:                row.state,
+          service_category:     row.service_category,
+          application_status:   row.application_status,
+          date_posted:          row.date_posted,
+          bid_due_date:         row.bid_due_date,
+          tech_contact_name:    row.tech_contact_name,
+          tech_contact_email:   row.tech_contact_email,
+          tech_contact_phone:   row.tech_contact_phone,
+          narrative:            row.narrative,
+          // Extra fields from raw
+          form_nickname:        raw.form_nickname        || null,
+          category_of_service:  raw.category_one_description || raw.category_two_description || raw.service_category || null,
+          allowable_contract_date: raw.allowable_contract_date || null,
+          signal_type:          raw.signal_type          || null,
+          function_type:        raw.function_type        || null,
+          pricing_type:         raw.pricing_type         || null,
+          wan:                  raw.wan                  || null,
+          fiber_type:           raw.fiber_type           || null,
+          narrative_description: raw.narrative_description || raw.service_narrative || null,
+          special_construction: raw.special_construction || null,
+          consultant_name:      raw.consultant_name      || null,
+          consultant_phone:     raw.consultant_phone     || null,
+          rfp_document_url:     raw.rfp_document_url     || raw.rfp_url || raw.document_url || null,
+          // Build USAC direct links
+          usac_url:             `https://forms.universalservice.org/portal/form470/view/formSummary?fn=${app_num}&fy=${row.funding_year || 2026}`,
+          epc_url:              `https://portal.usac.org/suite/#/470/${app_num}`,
+          ffl_url:              `https://legacy.fundsforlearning.com/470/${app_num}`,
+          // All raw for reference
+          raw,
+        }
+      });
+    }
+
+    // Fallback: query USAC live
+    const where = `application_number='${app_num}'`;
+    const url   = `${USAC_BASE}/jt8s-3q52.json?$where=${encodeURIComponent(where)}&$limit=1`;
+    const r     = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const usac  = await r.json();
+
+    if (!Array.isArray(usac) || !usac.length) {
+      return res.json({ status:"success", data: null });
+    }
+
+    const d = usac[0];
+    res.json({
+      status: "success",
+      source: "usac_live",
+      data: {
+        application_number:   d.application_number,
+        funding_year:         d.funding_year,
+        billed_entity_name:   d.billed_entity_name,
+        billed_entity_number: d.billed_entity_number,
+        state:                d.billed_entity_state,
+        service_category:     d.category_two_description || d.service_category,
+        application_status:   d.fcc_form_470_status || d.application_status,
+        date_posted:          d.certified_date_time,
+        bid_due_date:         d.allowable_contract_date,
+        tech_contact_name:    d.technical_contact_name || d.contact_name,
+        tech_contact_email:   d.technical_contact_email || d.contact_email,
+        tech_contact_phone:   d.technical_contact_phone || d.contact_phone,
+        narrative:            d.form_nickname,
+        narrative_description: d.narrative_description || d.service_narrative,
+        rfp_document_url:     d.rfp_document_url || d.rfp_url || d.document_url,
+        usac_url:             `https://forms.universalservice.org/portal/form470/view/formSummary?fn=${d.application_number}&fy=${d.funding_year || 2026}`,
+        epc_url:              `https://portal.usac.org/suite/#/470/${d.application_number}`,
+        ffl_url:              `https://legacy.fundsforlearning.com/470/${d.application_number}`,
+        raw: d,
+      }
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ status:"error", message: err.message });
   }
 });
 
