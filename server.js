@@ -585,6 +585,22 @@ app.get("/api/entity-search", requireAuth, async (req, res) => {
   }
 });
 
+// ── TEMP: 470 detail diagnostic ──────────────────────────────────────────────
+app.get("/api/diag-470-detail", async (req, res) => {
+  try {
+    const { app_num } = req.query;
+    const where = app_num ? `application_number='${app_num}'` : `billed_entity_state='TX' AND funding_year='2026'`;
+    const url = `${USAC_BASE}/jt8s-3q52.json?$where=${encodeURIComponent(where)}&$limit=1`;
+    const r   = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const data = await r.json();
+    // Also check for RFP documents dataset
+    const docUrl = `https://opendata.usac.org/resource/7i5i-83qf.json?$limit=1`;
+    res.json({ fields: Array.isArray(data) ? Object.keys(data[0] || {}) : [], sample: data[0] || {}, note: "Check fields for rfp, document, attachment, or url" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── TEMP: C2 budget raw diagnostic ───────────────────────────────────────────
 app.get("/api/diag-c2", async (req, res) => {
   try {
