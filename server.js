@@ -683,26 +683,6 @@ app.get("/api/470-detail", requireAuth, async (req, res) => {
   }
 });
 
-// ── TEMP: 470 services fields diagnostic ─────────────────────────────────────
-app.get("/api/diag-470-services", async (req, res) => {
-  try {
-    const { app_num } = req.query;
-    const where = app_num
-      ? `application_number='${app_num}'`
-      : `funding_year='2026'`;
-    const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(where)}&$limit=3`;
-    const r   = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
-    const data = await r.json();
-    res.json({
-      count: data.length,
-      fields: Array.isArray(data) && data[0] ? Object.keys(data[0]) : [],
-      sample: data[0] || {}
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ── TEMP: C2 budget raw diagnostic ───────────────────────────────────────────
 app.get("/api/diag-c2", async (req, res) => {
   try {
