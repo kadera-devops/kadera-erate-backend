@@ -1462,7 +1462,8 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
 
       // Use $where with like — correct SODA syntax for this dataset
       while (true) {
-        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent("manufacturer like '%" + prod + "%'")}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
+        const whereClause = "manufacturer like '%" + prod + "%' AND funding_year='" + fy + "'";
+        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(whereClause)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents,funding_year`;
         try {
           const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
           const rows = await r.json();
@@ -1501,7 +1502,6 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
         let q = supabase
           .from("form_470s")
           .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
-          .eq("funding_year", fy)
           .in("application_number", batch);
 
         if (kws) {
