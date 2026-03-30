@@ -876,13 +876,14 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
     for (const r of commitments) {
       const name = (r.spin_name || "").trim();
       if (!name) continue;
-      if (!providerMap[name]) providerMap[name] = { count:0, amount:0 };
+      if (!providerMap[name]) providerMap[name] = { count:0, total:0, orgs: new Set() };
       providerMap[name].count++;
-      providerMap[name].amount += parseFloat(r.funding_commitment_request) || 0;
+      providerMap[name].total += parseFloat(r.funding_commitment_request) || 0;
+      if (r.organization_name) providerMap[name].orgs.add(r.organization_name);
     }
-    const topProviders = Object.entries(providerMap)
-      .map(([name, v]) => ({ name, count: v.count, amount: Math.round(v.amount) }))
-      .sort((a,b) => b.count - a.count)
+    const top_providers = Object.entries(providerMap)
+      .map(([name, v]) => ({ name, count: v.count, total: Math.round(v.total), orgs: v.orgs.size }))
+      .sort((a,b) => b.total - a.total)
       .slice(0, 25);
 
     // Manufacturer breakdown — from real form_471_manufacturer_name field
@@ -901,7 +902,7 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       }
     }
     const manufacturers = MANUFACTURERS.map(name => ({
-      name, count: mfrMap[name].count, amount: Math.round(mfrMap[name].amount),
+      name, count: mfrMap[name].count, total: Math.round(mfrMap[name].amount),
     })).sort((a,b) => b.count - a.count);
 
     // Service type breakdown from commitments
@@ -911,7 +912,7 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       if (!serviceMap[svc]) serviceMap[svc] = 0;
       serviceMap[svc]++;
     }
-    const serviceTypes = Object.entries(serviceMap)
+    const service_types = Object.entries(serviceMap)
       .map(([name, count]) => ({ name, count }))
       .sort((a,b) => b.count - a.count)
       .slice(0, 8);
@@ -923,12 +924,12 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       if (!productMap[prod]) productMap[prod] = 0;
       productMap[prod]++;
     }
-    const topProducts = Object.entries(productMap)
+    const top_products = Object.entries(productMap)
       .map(([name, count]) => ({ name, count }))
       .sort((a,b) => b.count - a.count)
       .slice(0, 10);
 
-    res.json({ status:"success", data:{ topProviders, manufacturers, serviceTypes, topProducts, total: commitments.length, lineItemTotal: lineItems.length, lineItemsFY: "2025" } });
+    res.json({ status:"success", data:{ top_providers, manufacturers, service_types, top_products, total: commitments.length, lineItemTotal: lineItems.length } });
   } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
   }
