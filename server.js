@@ -1442,22 +1442,27 @@ Always query the database to give real, specific answers. Format dollar amounts 
 app.get("/api/contact-search", requireAuth, async (req, res) => {
   try {
     const { keywords, product, service_category, funding_year, limit = 500 } = req.query;
-    if (!keywords || keywords.trim().length < 2) {
-      return res.status(400).json({ status:"error", message:"keywords required" });
+    const kws = (keywords || "").trim();
+    const prod = (product || "").trim();
+    if (!kws && !prod) {
+      return res.status(400).json({ status:"error", message:"keywords or product required" });
     }
 
-    const fy    = funding_year || "2026";
-    const terms = keywords.split(",").map(k => k.trim()).filter(Boolean);
-    const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
+    const fy = funding_year || "2026";
 
-    // Step 1: Get matching 470s by entity name keyword
+    // Step 1: Get matching 470s — if no keywords, fetch all
     let query = supabase
       .from("form_470s")
       .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
       .eq("funding_year", fy)
-      .or(orFilter)
       .order("billed_entity_name", { ascending: true })
       .limit(Number(limit));
+
+    if (kws) {
+      const terms    = kws.split(",").map(k => k.trim()).filter(Boolean);
+      const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
+      query = query.or(orFilter);
+    }
 
     if (service_category && service_category !== "ALL") {
       query = query.ilike("service_category", `%${service_category}%`);
