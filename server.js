@@ -1492,66 +1492,55 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
         return res.json({ status:"success", data:[], count:0 });
       }
 
-      // 2. Look up those app numbers in form_470s, filtering by keywords + fy
+      // 2. Look up those app numbers from USAC master 470 dataset (jp7a-89nd)
+      //    This gives us entity name, BEN, and tech contact regardless of our local DB
       const appArr = [...matchedAppNums];
-      const BATCH  = 100;
+      const USAC_BATCH = 50;
       const allRows = [];
 
-      for (let i = 0; i < appArr.length; i += BATCH) {
-        const batch = appArr.slice(i, i + BATCH);
-        let q = supabase
-          .from("form_470s")
-          .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
-          .in("application_number", batch);
-
+      for (let i = 0; i < appArr.length; i += USAC_BATCH) {
+        const batch    = appArr.slice(i, i + USAC_BATCH);
+        const inClause = batch.map(n => `'${n}'`).join(",");
+        let whereStr   = `application_number IN(${inClause})`;
         if (kws) {
-          const terms    = kws.split(",").map(k => k.trim()).filter(Boolean);
-          const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
-          q = q.or(orFilter);
+          const terms = kws.split(",").map(k => k.trim()).filter(Boolean);
+          const nameFilter = terms.map(t => `billed_entity_name like '%${t}%'`).join(" OR ");
+          whereStr += ` AND (${nameFilter})`;
         }
         if (service_category && service_category !== "ALL") {
-          q = q.ilike("service_category", `%${service_category}%`);
+          whereStr += ` AND category_of_service like '%${service_category}%'`;
         }
-
-        const { data: batch_data } = await q;
-        allRows.push(...(batch_data || []));
+        const usacUrl = `${USAC_BASE}/jp7a-89nd.json?$where=${encodeURIComponent(whereStr)}&$limit=${USAC_BATCH * 2}&$select=application_number,billed_entity_name,billed_entity_number,billed_entity_state,fcc_form_470_status,allowable_contract_date,certified_date_time,technical_contact_name,technical_contact_email,technical_contact_phone,category_of_service,funding_year`;
+        try {
+          const r    = await fetch(usacUrl, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+          const rows = await r.json();
+          if (Array.isArray(rows)) allRows.push(...rows);
+        } catch {}
       }
 
-      // Deduplicate by entity — prefer local DB rows (have contacts), fall back to USAC data
+      // Deduplicate by entity, normalize USAC master field names
       const entityMap = {};
       for (const r of allRows) {
         const key = r.billed_entity_number || r.billed_entity_name;
-        if (!entityMap[key] || new Date(r.date_posted) > new Date(entityMap[key].date_posted)) {
-          entityMap[key] = { ...r, matched_services: serviceDetails[r.application_number] || [] };
-        }
-      }
-
-      // Also include app numbers found in USAC but NOT in our local DB
-      // so the 470 link still works via app number
-      for (const appNum of matchedAppNums) {
-        const svc = serviceDetails[appNum]?.[0];
-        if (!svc) continue;
-        // Check if this app is already represented in entityMap
-        const alreadyCovered = Object.values(entityMap).some(e => e.application_number === appNum);
-        if (!alreadyCovered) {
-          // Not in local DB — create a minimal record with just the app number for the link
-          entityMap[`usac_${appNum}`] = {
-            application_number:   appNum,
-            billed_entity_name:   null,
-            billed_entity_number: null,
-            service_category:     svc.service_type,
-            application_status:   null,
-            bid_due_date:         null,
-            tech_contact_name:    null,
-            tech_contact_email:   null,
-            tech_contact_phone:   null,
-            matched_services:     serviceDetails[appNum] || [],
+        if (!key) continue;
+        if (!entityMap[key]) {
+          entityMap[key] = {
+            application_number:   r.application_number,
+            billed_entity_name:   r.billed_entity_name,
+            billed_entity_number: r.billed_entity_number,
+            state:                r.billed_entity_state || r.state,
+            service_category:     r.category_of_service || r.service_category,
+            application_status:   r.fcc_form_470_status || r.application_status,
+            bid_due_date:         r.allowable_contract_date || r.bid_due_date,
+            tech_contact_name:    r.technical_contact_name  || r.tech_contact_name,
+            tech_contact_email:   r.technical_contact_email || r.tech_contact_email,
+            tech_contact_phone:   r.technical_contact_phone || r.tech_contact_phone,
+            matched_services:     serviceDetails[r.application_number] || [],
           };
         }
       }
 
       results = Object.values(entityMap)
-        .filter(r => r.billed_entity_name || r.application_number) // drop empty rows
         .sort((a, b) => (a.billed_entity_name || "").localeCompare(b.billed_entity_name || ""));
 
     } else {
