@@ -1517,7 +1517,7 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
         allRows.push(...(batch_data || []));
       }
 
-      // Deduplicate by entity
+      // Deduplicate by entity — prefer local DB rows (have contacts), fall back to USAC data
       const entityMap = {};
       for (const r of allRows) {
         const key = r.billed_entity_number || r.billed_entity_name;
@@ -1526,9 +1526,33 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
         }
       }
 
-      results = Object.values(entityMap).sort((a, b) =>
-        (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
-      );
+      // Also include app numbers found in USAC but NOT in our local DB
+      // so the 470 link still works via app number
+      for (const appNum of matchedAppNums) {
+        const svc = serviceDetails[appNum]?.[0];
+        if (!svc) continue;
+        // Check if this app is already represented in entityMap
+        const alreadyCovered = Object.values(entityMap).some(e => e.application_number === appNum);
+        if (!alreadyCovered) {
+          // Not in local DB — create a minimal record with just the app number for the link
+          entityMap[`usac_${appNum}`] = {
+            application_number:   appNum,
+            billed_entity_name:   null,
+            billed_entity_number: null,
+            service_category:     svc.service_type,
+            application_status:   null,
+            bid_due_date:         null,
+            tech_contact_name:    null,
+            tech_contact_email:   null,
+            tech_contact_phone:   null,
+            matched_services:     serviceDetails[appNum] || [],
+          };
+        }
+      }
+
+      results = Object.values(entityMap)
+        .filter(r => r.billed_entity_name || r.application_number) // drop empty rows
+        .sort((a, b) => (a.billed_entity_name || "").localeCompare(b.billed_entity_name || ""));
 
     } else {
       // ── Keywords-only strategy ────────────────────────────────────────────────
