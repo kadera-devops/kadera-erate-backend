@@ -1461,15 +1461,15 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
       const PAGE = 5000;
 
       while (true) {
-        const where = `manufacturer.ilike.%25${encodeURIComponent(prod)}%25` +
-          `&$limit=${PAGE}&$offset=${offset}` +
-          `&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
-        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(`manufacturer LIKE '%${prod}%'`)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
+        // Search across manufacturer, service_type, and function fields
+        const whereClause = `upper(manufacturer) like upper('%${prod}%') OR upper(service_type) like upper('%${prod}%') OR upper(function) like upper('%${prod}%')`;
+        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(whereClause)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
         try {
           const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
           const rows = await r.json();
-          if (!rows?.length) break;
+          if (!Array.isArray(rows) || !rows.length) break;
           for (const row of rows) {
+            if (!row.application_number) continue;
             matchedAppNums.add(row.application_number);
             if (!serviceDetails[row.application_number]) serviceDetails[row.application_number] = [];
             const already = serviceDetails[row.application_number].some(s => s.manufacturer === row.manufacturer && s.service_type === row.service_type);
@@ -1483,8 +1483,9 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
           }
           if (rows.length < PAGE) break;
           offset += PAGE;
-        } catch { break; }
+        } catch (e) { console.error("USAC services fetch error:", e.message); break; }
       }
+      console.log(`Product search "${prod}": found ${matchedAppNums.size} app numbers from USAC services`);
 
       if (!matchedAppNums.size) {
         return res.json({ status:"success", data:[], count:0 });
