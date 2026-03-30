@@ -1460,9 +1460,9 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
       let offset = 0;
       const PAGE = 5000;
 
-      // Use $q full-text search — works across all text fields including manufacturer
+      // Use $where with like — correct SODA syntax for this dataset
       while (true) {
-        const url = `${USAC_BASE}/39tn-hjzv.json?$q=${encodeURIComponent(prod)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
+        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent("manufacturer like '%" + prod + "%'")}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
         try {
           const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
           const rows = await r.json();
