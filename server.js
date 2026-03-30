@@ -1395,7 +1395,7 @@ Always query the database to give real, specific answers. Format dollar amounts 
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-opus-4-5",
+          model: "claude-sonnet-4-6",
           max_tokens: 4096,
           system: systemPrompt,
           tools,
@@ -1434,6 +1434,158 @@ Always query the database to give real, specific answers. Format dollar amounts 
     res.json({ status:"success", response: finalResponse, tools_used: toolsUsed });
   } catch (err) {
     console.error("Claude chat error:", err);
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
+// ── GET /api/contact-search — search 470s by entity type keyword, return tech contacts ──
+app.get("/api/contact-search", requireAuth, async (req, res) => {
+  try {
+    const { keywords, service_category, funding_year, limit = 200 } = req.query;
+    if (!keywords || keywords.trim().length < 2) {
+      return res.status(400).json({ status:"error", message:"keywords required" });
+    }
+
+    const fy   = funding_year || "2026";
+    const terms = keywords.split(",").map(k => k.trim()).filter(Boolean);
+
+    // Build OR filter across all terms against billed_entity_name
+    const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
+
+    let query = supabase
+      .from("form_470s")
+      .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
+      .eq("funding_year", fy)
+      .or(orFilter)
+      .order("billed_entity_name", { ascending: true })
+      .limit(Number(limit));
+
+    if (service_category && service_category !== "ALL") {
+      query = query.ilike("service_category", `%${service_category}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    // Deduplicate by entity — keep most recent 470 per entity
+    const entityMap = {};
+    for (const r of data || []) {
+      const key = r.billed_entity_number || r.billed_entity_name;
+      if (!entityMap[key] || new Date(r.date_posted) > new Date(entityMap[key].date_posted)) {
+        entityMap[key] = r;
+      }
+    }
+
+    const results = Object.values(entityMap).sort((a, b) =>
+      (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
+    );
+
+    res.json({ status:"success", data: results, count: results.length, raw_count: (data || []).length });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
+// ── GET /api/vendor-contacts — find tech contacts who bought a specific product/brand ──
+app.get("/api/vendor-contacts", requireAuth, async (req, res) => {
+  try {
+    const { keyword, funding_year, limit = 300 } = req.query;
+    if (!keyword || keyword.trim().length < 2) {
+      return res.status(400).json({ status:"error", message:"keyword required" });
+    }
+
+    const kw = keyword.trim();
+    const fy = funding_year || "2025"; // line items are FY2025
+
+    // Step 1: Find all line items matching the keyword (manufacturer, model, or product name)
+    const { data: lineItems, error: liErr } = await supabase
+      .from("frn_line_items")
+      .select("application_number, organization_name, form_471_manufacturer_name, model_of_equipment, form_471_product_name, pre_discount_extended_eligible_line_item_costs")
+      .or(`form_471_manufacturer_name.ilike.%${kw}%,model_of_equipment.ilike.%${kw}%,form_471_product_name.ilike.%${kw}%`)
+      .order("pre_discount_extended_eligible_line_item_costs", { ascending: false })
+      .limit(1000);
+
+    if (liErr) throw liErr;
+    if (!lineItems?.length) return res.json({ status:"success", data:[], count:0 });
+
+    // Step 2: Get unique org names and app numbers to look up contacts
+    const orgNames = [...new Set(lineItems.map(r => r.organization_name).filter(Boolean))];
+    const appNums  = [...new Set(lineItems.map(r => r.application_number).filter(Boolean))];
+
+    // Step 3: Look up tech contacts from form_470s matching those org names (current FY)
+    // Build OR filter for org names (up to 50 to avoid query limits)
+    const orgSample = orgNames.slice(0, 80);
+    const orFilter  = orgSample.map(n => `billed_entity_name.ilike.%${n.split(" ").slice(0,3).join(" ")}%`).join(",");
+
+    const { data: contacts470, error: cErr } = await supabase
+      .from("form_470s")
+      .select("billed_entity_name, billed_entity_number, application_number, service_category, application_status, bid_due_date, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
+      .eq("funding_year", "2026")
+      .not("tech_contact_email", "is", null)
+      .or(orFilter)
+      .limit(500);
+
+    if (cErr) throw cErr;
+
+    // Step 4: Cross-reference — build a map of org → line item details
+    const orgToLineItem = {};
+    for (const li of lineItems) {
+      const key = (li.organization_name || "").toLowerCase().trim();
+      if (!orgToLineItem[key]) {
+        orgToLineItem[key] = {
+          manufacturer: li.form_471_manufacturer_name,
+          model:        li.model_of_equipment,
+          product:      li.form_471_product_name,
+          total_spend:  0,
+          app_number_471: li.application_number,
+        };
+      }
+      orgToLineItem[key].total_spend += parseFloat(li.pre_discount_extended_eligible_line_item_costs) || 0;
+    }
+
+    // Step 5: Match contacts to line item data, deduplicate by entity
+    const seen = new Set();
+    const results = [];
+    for (const c of contacts470 || []) {
+      const key = (c.billed_entity_name || "").toLowerCase().trim();
+      if (seen.has(key)) continue;
+      const liData = orgToLineItem[key] || {};
+      // Fuzzy match — check if any word overlap
+      const entityWords = key.split(/\s+/).filter(w => w.length > 3);
+      const liKey = Object.keys(orgToLineItem).find(k =>
+        entityWords.some(w => k.includes(w))
+      );
+      const matchedLi = liData.manufacturer ? liData : (liKey ? orgToLineItem[liKey] : {});
+      seen.add(key);
+      results.push({
+        entity_name:      c.billed_entity_name,
+        ben:              c.billed_entity_number,
+        service_category: c.service_category,
+        application_status: c.application_status,
+        bid_due_date:     c.bid_due_date,
+        tech_contact_name:  c.tech_contact_name,
+        tech_contact_email: c.tech_contact_email,
+        tech_contact_phone: c.tech_contact_phone,
+        manufacturer:     matchedLi.manufacturer || kw,
+        model:            matchedLi.model,
+        product:          matchedLi.product,
+        total_spend:      matchedLi.total_spend ? Math.round(matchedLi.total_spend) : null,
+        app_number_470:   c.application_number,
+        app_number_471:   matchedLi.app_number_471,
+      });
+    }
+
+    // Sort by total spend descending
+    results.sort((a, b) => (b.total_spend || 0) - (a.total_spend || 0));
+
+    res.json({
+      status: "success",
+      data: results.slice(0, Number(limit)),
+      count: results.length,
+      raw_line_items: lineItems.length,
+      keyword: kw,
+    });
+  } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
   }
 });
