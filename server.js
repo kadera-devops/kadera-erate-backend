@@ -1046,30 +1046,44 @@ app.get("/api/provider-search", requireAuth, async (req, res) => {
   }
 });
 
-// ── GET /api/provider-applicants — applicants for a given SPIN ───────────────
+// ── GET /api/provider-applicants — FRNs won by a provider, with year filter ───
 app.get("/api/provider-applicants", requireAuth, async (req, res) => {
   try {
-    const { spin_name } = req.query;
+    const { spin_name, funding_year } = req.query;
     if (!spin_name) return res.status(400).json({ status:"error", message:"spin_name required" });
-    const { data, error } = await supabase
+
+    let query = supabase
       .from("commitments")
-      .select("organization_name, ben, funding_commitment_request, form_471_service_type_name, form_471_frn_status_name, application_number")
+      .select("funding_request_number, organization_name, ben, application_number, funding_year, form_471_service_type_name, form_471_frn_status_name, funding_commitment_request, dis_pct, fcdl_letter_date, spin_name")
       .ilike("spin_name", `%${spin_name}%`)
       .order("funding_commitment_request", { ascending: false })
-      .limit(100);
-    if (error) throw error;
-    // Deduplicate by organization_name, summing commitment amounts
-    const orgMap = {};
-    for (const r of data || []) {
-      const key = r.organization_name || "Unknown";
-      if (!orgMap[key]) orgMap[key] = { name: key, ben: r.ben, total: 0, count: 0, service: r.form_471_service_type_name };
-      orgMap[key].total += parseFloat(r.funding_commitment_request) || 0;
-      orgMap[key].count++;
+      .limit(500);
+
+    if (funding_year && funding_year !== "ALL") {
+      query = query.eq("funding_year", funding_year);
     }
-    const applicants = Object.values(orgMap)
-      .map(o => ({ ...o, total: Math.round(o.total) }))
-      .sort((a,b) => b.total - a.total);
-    res.json({ status:"success", data: applicants });
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const rows = (data || []).map(r => ({
+      frn:              r.funding_request_number,
+      organization:     r.organization_name,
+      ben:              r.ben,
+      application_number: r.application_number,
+      funding_year:     r.funding_year,
+      service_type:     r.form_471_service_type_name,
+      frn_status:       r.form_471_frn_status_name,
+      commitment:       parseFloat(r.funding_commitment_request) || null,
+      discount_pct:     r.dis_pct ? Math.round(parseFloat(r.dis_pct) * 100) : null,
+      fcdl_date:        r.fcdl_letter_date,
+      spin_name:        r.spin_name,
+    }));
+
+    const total = rows.reduce((s, r) => s + (r.commitment || 0), 0);
+    const orgs  = [...new Set(rows.map(r => r.organization).filter(Boolean))];
+
+    res.json({ status:"success", data: rows, count: rows.length, total_committed: Math.round(total), unique_orgs: orgs.length });
   } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
   }
