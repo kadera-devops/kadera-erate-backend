@@ -1241,6 +1241,204 @@ app.patch("/api/tags/:appNumber", requireAuth, async (req, res) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+// ── POST /api/claude-chat — Claude AI with direct DB tool access ──────────────
+app.post("/api/claude-chat", requireAuth, async (req, res) => {
+  try {
+    const { messages } = req.body;
+    if (!messages?.length) return res.status(400).json({ status:"error", message:"messages required" });
+
+    const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!ANTHROPIC_KEY) return res.status(500).json({ status:"error", message:"ANTHROPIC_API_KEY not configured" });
+
+    // ── Tools Claude can use to query your DB ─────────────────────────────────
+    const tools = [
+      {
+        name: "query_470s",
+        description: "Search open Form 470 bidding opportunities from the form_470s table. Use this to find open bids, upcoming deadlines, districts seeking bids, service categories, etc.",
+        input_schema: {
+          type: "object",
+          properties: {
+            state:            { type: "string", description: "Filter by state code e.g. TX" },
+            service_category: { type: "string", description: "Filter by service category e.g. 'Internal Connections'" },
+            days_until_due:   { type: "number", description: "Filter to bids due within this many days" },
+            entity_name:      { type: "string", description: "Filter by district/entity name (partial match)" },
+            funding_year:     { type: "string", description: "Filter by funding year e.g. 2026" },
+            limit:            { type: "number", description: "Max records to return (default 20)" },
+          }
+        }
+      },
+      {
+        name: "query_commitments",
+        description: "Search E-Rate commitment decisions from the commitments table. Use this for competitive intelligence — which providers are winning, how much revenue, which districts are funded, service type breakdowns.",
+        input_schema: {
+          type: "object",
+          properties: {
+            spin_name:        { type: "string", description: "Filter by service provider name (partial match)" },
+            organization_name:{ type: "string", description: "Filter by applicant/district name (partial match)" },
+            service_type:     { type: "string", description: "Filter by service type e.g. 'Internal Connections'" },
+            funding_year:     { type: "string", description: "Filter by funding year e.g. 2026" },
+            frn_status:       { type: "string", description: "Filter by FRN status e.g. 'Funded'" },
+            state:            { type: "string", description: "Filter by state code" },
+            limit:            { type: "number", description: "Max records to return (default 25)" },
+          }
+        }
+      },
+      {
+        name: "query_tagged",
+        description: "Query the user's tagged 470s pipeline — opportunities they are tracking, bid statuses (won/lost), amounts, margins. Use for pipeline and win rate analysis.",
+        input_schema: {
+          type: "object",
+          properties: {
+            bid_status: { type: "string", description: "Filter by status: won, lost, or leave empty for all" },
+            responded:  { type: "boolean", description: "Filter by whether a bid was submitted" },
+            limit:      { type: "number", description: "Max records to return (default 50)" },
+          }
+        }
+      },
+      {
+        name: "query_prospects",
+        description: "Find C2 budget prospects — TX school districts that have Category 2 budget available but haven't filed a Form 470 yet this year. Great for finding new leads.",
+        input_schema: {
+          type: "object",
+          properties: {
+            min_budget: { type: "number", description: "Minimum C2 budget remaining (default 10000)" },
+            limit:      { type: "number", description: "Max records to return (default 20)" },
+          }
+        }
+      },
+    ];
+
+    // ── Tool execution ─────────────────────────────────────────────────────────
+    async function executeTool(name, input) {
+      try {
+        if (name === "query_470s") {
+          let q = supabase.from("form_470s").select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, date_posted, bid_due_date, funding_year").order("bid_due_date", { ascending: true }).limit(input.limit || 20);
+          if (input.state)            q = q.eq("state", input.state);
+          if (input.funding_year)     q = q.eq("funding_year", input.funding_year);
+          if (input.service_category) q = q.ilike("service_category", `%${input.service_category}%`);
+          if (input.entity_name)      q = q.ilike("billed_entity_name", `%${input.entity_name}%`);
+          if (input.days_until_due) {
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() + input.days_until_due);
+            q = q.lte("bid_due_date", cutoff.toISOString()).gte("bid_due_date", new Date().toISOString());
+          }
+          const { data, error } = await q;
+          if (error) return `Error: ${error.message}`;
+          return JSON.stringify(data || []);
+        }
+
+        if (name === "query_commitments") {
+          let q = supabase.from("commitments").select("organization_name, ben, spin_name, form_471_service_type_name, form_471_frn_status_name, funding_commitment_request, dis_pct, fcdl_letter_date, funding_year, application_number").order("funding_commitment_request", { ascending: false }).limit(input.limit || 25);
+          if (input.spin_name)         q = q.ilike("spin_name", `%${input.spin_name}%`);
+          if (input.organization_name) q = q.ilike("organization_name", `%${input.organization_name}%`);
+          if (input.service_type)      q = q.ilike("form_471_service_type_name", `%${input.service_type}%`);
+          if (input.funding_year)      q = q.eq("funding_year", input.funding_year);
+          if (input.frn_status)        q = q.ilike("form_471_frn_status_name", `%${input.frn_status}%`);
+          if (input.state)             q = q.eq("state", input.state);
+          const { data, error } = await q;
+          if (error) return `Error: ${error.message}`;
+          return JSON.stringify(data || []);
+        }
+
+        if (name === "query_tagged") {
+          let q = supabase.from("tagged_470s").select("*").order("created_at", { ascending: false }).limit(input.limit || 50);
+          if (input.bid_status !== undefined && input.bid_status !== "") q = q.eq("bid_status", input.bid_status);
+          if (input.responded !== undefined) q = q.eq("responded", input.responded);
+          const { data, error } = await q;
+          if (error) return `Error: ${error.message}`;
+          return JSON.stringify(data || []);
+        }
+
+        if (name === "query_prospects") {
+          const min = input.min_budget || 10000;
+          const limit = input.limit || 20;
+          const url = `${process.env.USAC_BASE || "https://opendata.usac.org/resource"}/6brt-5pbv.json?$where=${encodeURIComponent(`state_code='TX' AND remaining_c2_budget > ${min}`)}&$order=remaining_c2_budget DESC&$limit=${limit}`;
+          const r = await fetch(url, { headers:{ "X-App-Token": process.env.USAC_APP_TOKEN || "" } });
+          const data = await r.json();
+          return JSON.stringify(data || []);
+        }
+
+        return "Unknown tool";
+      } catch (err) {
+        return `Tool error: ${err.message}`;
+      }
+    }
+
+    // ── Agentic loop — Claude calls tools until it has an answer ──────────────
+    const systemPrompt = `You are Kadera AI, an expert E-Rate intelligence assistant embedded in the Kadera E-Rate Dashboard. You have direct access to the user's E-Rate database through the provided tools.
+
+Your database contains:
+- form_470s: Open TX FY2026 Form 470 bidding opportunities (competitive bids from school districts)
+- commitments: FY2026 TX E-Rate commitment decisions (which providers won, how much, which districts)
+- tagged_470s: The user's tracked opportunities with bid status, amounts, and margins
+- C2 budget prospects via USAC API
+
+You help the user with:
+- Finding bidding opportunities (open 470s, upcoming deadlines)
+- Competitive intelligence (which providers are winning, revenue by provider, market share)
+- Pipeline analysis (their tagged bids, win rates, revenue)
+- Prospect identification (districts with budget but no active 470)
+- Market research (service type trends, discount rates, geographic analysis)
+
+Always query the database to give real, specific answers. Format dollar amounts with $ and commas. Be concise and actionable. Today's date is ${new Date().toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" })}.`;
+
+    let claudeMessages = messages.map(m => ({ role: m.role, content: m.content }));
+    let finalResponse = "";
+    const toolsUsed = [];
+
+    for (let round = 0; round < 5; round++) {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-opus-4-5",
+          max_tokens: 4096,
+          system: systemPrompt,
+          tools,
+          messages: claudeMessages,
+        }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message || "Anthropic API error");
+
+      // Add assistant response to message history
+      claudeMessages.push({ role: "assistant", content: result.content });
+
+      if (result.stop_reason === "end_turn") {
+        finalResponse = result.content.filter(b => b.type === "text").map(b => b.text).join("\n");
+        break;
+      }
+
+      if (result.stop_reason === "tool_use") {
+        const toolResults = [];
+        for (const block of result.content) {
+          if (block.type === "tool_use") {
+            toolsUsed.push({ name: block.name, input: block.input });
+            const toolResult = await executeTool(block.name, block.input);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: toolResult,
+            });
+          }
+        }
+        claudeMessages.push({ role: "user", content: toolResults });
+      }
+    }
+
+    res.json({ status:"success", response: finalResponse, tools_used: toolsUsed });
+  } catch (err) {
+    console.error("Claude chat error:", err);
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log("============================================");
   console.log("  KADERA E-RATE — API Server");
