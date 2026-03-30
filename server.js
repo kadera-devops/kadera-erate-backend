@@ -1463,7 +1463,7 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
       // Use $where with like — correct SODA syntax for this dataset
       while (true) {
         const whereClause = "manufacturer like '%" + prod + "%' AND funding_year='" + fy + "'";
-        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(whereClause)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents,funding_year`;
+        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(whereClause)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,rfp_documents,funding_year`;
         try {
           const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
           const rows = await r.json();
