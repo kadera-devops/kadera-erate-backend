@@ -1438,20 +1438,19 @@ Always query the database to give real, specific answers. Format dollar amounts 
   }
 });
 
-// ── GET /api/contact-search — search 470s by entity type keyword, return tech contacts ──
+// ── GET /api/contact-search — search 470s by entity type + optional product keyword ──
 app.get("/api/contact-search", requireAuth, async (req, res) => {
   try {
-    const { keywords, service_category, funding_year, limit = 200 } = req.query;
+    const { keywords, product, service_category, funding_year, limit = 500 } = req.query;
     if (!keywords || keywords.trim().length < 2) {
       return res.status(400).json({ status:"error", message:"keywords required" });
     }
 
-    const fy   = funding_year || "2026";
+    const fy    = funding_year || "2026";
     const terms = keywords.split(",").map(k => k.trim()).filter(Boolean);
-
-    // Build OR filter across all terms against billed_entity_name
     const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
 
+    // Step 1: Get matching 470s by entity name keyword
     let query = supabase
       .from("form_470s")
       .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
@@ -1475,12 +1474,50 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
         entityMap[key] = r;
       }
     }
-
-    const results = Object.values(entityMap).sort((a, b) =>
+    let results = Object.values(entityMap).sort((a, b) =>
       (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
     );
 
-    res.json({ status:"success", data: results, count: results.length, raw_count: (data || []).length });
+    // Step 2: If product keyword provided, filter to only 470s whose services mention it
+    if (product && product.trim().length >= 2) {
+      const kw      = product.trim();
+      const appNums = results.map(r => r.application_number).filter(Boolean);
+      const matched = new Set();
+      const serviceDetails = {};
+
+      // Batch USAC 470 services query in groups of 20
+      for (let i = 0; i < appNums.length; i += 20) {
+        const batch    = appNums.slice(i, i + 20);
+        const inClause = batch.map(n => `'${n}'`).join(",");
+        const where    = `application_number IN(${inClause})`;
+        const url      = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(where)}&$limit=500`;
+        try {
+          const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+          const rows = await r.json();
+          for (const row of rows || []) {
+            const text = [row.service_type, row.function, row.manufacturer, row.manufacturer_other_description]
+              .filter(Boolean).join(" ").toLowerCase();
+            if (text.includes(kw.toLowerCase())) {
+              matched.add(row.application_number);
+              if (!serviceDetails[row.application_number]) serviceDetails[row.application_number] = [];
+              const alreadyHas = serviceDetails[row.application_number].some(s => s.manufacturer === row.manufacturer && s.service_type === row.service_type);
+              if (!alreadyHas) serviceDetails[row.application_number].push({
+                service_type: row.service_type,
+                function:     row.function,
+                manufacturer: row.manufacturer,
+                entities:     row.number_of_entities,
+                rfp:          row.rfp_documents?.url || null,
+              });
+            }
+          }
+        } catch {}
+      }
+      results = results
+        .filter(r => matched.has(r.application_number))
+        .map(r => ({ ...r, matched_services: serviceDetails[r.application_number] || [] }));
+    }
+
+    res.json({ status:"success", data: results, count: results.length });
   } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
   }
@@ -1585,6 +1622,89 @@ app.get("/api/vendor-contacts", requireAuth, async (req, res) => {
       raw_line_items: lineItems.length,
       keyword: kw,
     });
+  } catch (err) {
+    res.status(500).json({ status:"error", message: err.message });
+  }
+});
+
+// ── GET /api/tags/keyword-search — filter tagged 470s by keyword in services ──
+app.get("/api/tags/keyword-search", requireAuth, async (req, res) => {
+  try {
+    const { keyword } = req.query;
+    if (!keyword || keyword.trim().length < 2) {
+      return res.status(400).json({ status:"error", message:"keyword required" });
+    }
+
+    // Step 1: Get all tagged app numbers for this user
+    const { data: tagged, error: tagErr } = await supabase
+      .from("tagged_470s")
+      .select("application_number, billed_entity_name, service_category, bid_due_date, responded, bid_status, bid_amount")
+      .eq("user_id", req.user.id);
+
+    if (tagErr) throw tagErr;
+    if (!tagged?.length) return res.json({ status:"success", data:[], count:0 });
+
+    const appNums = tagged.map(t => t.application_number).filter(Boolean);
+
+    // Step 2: Query USAC 470 services dataset for those app numbers with keyword match
+    // Batch into groups of 20 (SODA IN query limit)
+    const kw = keyword.trim();
+    const matches = new Set();
+    const serviceDetails = {};
+
+    const BATCH = 20;
+    for (let i = 0; i < appNums.length; i += BATCH) {
+      const batch = appNums.slice(i, i + BATCH);
+      const inClause = batch.map(n => `'${n}'`).join(",");
+      const where = `application_number IN(${inClause})`;
+      const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(where)}&$limit=500`;
+      try {
+        const r = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+        const rows = await r.json();
+        for (const row of rows || []) {
+          const text = [
+            row.service_type, row.function, row.manufacturer,
+            row.manufacturer_other_description
+          ].filter(Boolean).join(" ").toLowerCase();
+          if (text.includes(kw.toLowerCase())) {
+            matches.add(row.application_number);
+            if (!serviceDetails[row.application_number]) serviceDetails[row.application_number] = [];
+            serviceDetails[row.application_number].push({
+              service_type: row.service_type,
+              function:     row.function,
+              manufacturer: row.manufacturer,
+              entities:     row.number_of_entities,
+              rfp:          row.rfp_documents?.url || null,
+            });
+          }
+        }
+      } catch {}
+    }
+
+    // Step 3: Filter tagged to only matching ones, attach tech contacts from form_470s
+    const matchingAppNums = [...matches];
+    if (!matchingAppNums.length) return res.json({ status:"success", data:[], count:0, keyword: kw });
+
+    const { data: contacts } = await supabase
+      .from("form_470s")
+      .select("application_number, tech_contact_name, tech_contact_email, tech_contact_phone, billed_entity_number")
+      .in("application_number", matchingAppNums);
+
+    const contactMap = {};
+    for (const c of contacts || []) contactMap[c.application_number] = c;
+
+    const results = tagged
+      .filter(t => matches.has(t.application_number))
+      .map(t => ({
+        ...t,
+        tech_contact_name:  contactMap[t.application_number]?.tech_contact_name  || null,
+        tech_contact_email: contactMap[t.application_number]?.tech_contact_email || null,
+        tech_contact_phone: contactMap[t.application_number]?.tech_contact_phone || null,
+        ben:                contactMap[t.application_number]?.billed_entity_number || null,
+        services:           serviceDetails[t.application_number] || [],
+      }));
+
+    res.json({ status:"success", data: results, count: results.length, keyword: kw });
   } catch (err) {
     res.status(500).json({ status:"error", message: err.message });
   }
