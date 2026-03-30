@@ -1460,13 +1460,13 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
       let offset = 0;
       const PAGE = 5000;
 
+      // Use $q full-text search — works across all text fields including manufacturer
       while (true) {
-        // Search across manufacturer, service_type, and function fields
-        const whereClause = `upper(manufacturer) like upper('%${prod}%') OR upper(service_type) like upper('%${prod}%') OR upper(function) like upper('%${prod}%')`;
-        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(whereClause)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
+        const url = `${USAC_BASE}/39tn-hjzv.json?$q=${encodeURIComponent(prod)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
         try {
           const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
           const rows = await r.json();
+          console.log(`USAC services page offset=${offset}: ${Array.isArray(rows) ? rows.length : "error"} rows`, Array.isArray(rows) ? "" : JSON.stringify(rows).slice(0,200));
           if (!Array.isArray(rows) || !rows.length) break;
           for (const row of rows) {
             if (!row.application_number) continue;
@@ -1485,7 +1485,7 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
           offset += PAGE;
         } catch (e) { console.error("USAC services fetch error:", e.message); break; }
       }
-      console.log(`Product search "${prod}": found ${matchedAppNums.size} app numbers from USAC services`);
+      console.log(`Product search "${prod}": found ${matchedAppNums.size} matching app numbers`);
 
       if (!matchedAppNums.size) {
         return res.json({ status:"success", data:[], count:0 });
