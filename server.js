@@ -856,14 +856,17 @@ app.get("/api/frn-status", requireAuth, async (req, res) => {
 // ── GET /api/competitive-intel ────────────────────────────────────────────────
 app.get("/api/competitive-intel", requireAuth, async (req, res) => {
   try {
+    const { funding_year } = req.query;
+    const fy = funding_year || "2026";
+
     const MANUFACTURERS = [
       "Juniper","Aruba","HPE","Cisco","Meraki","Ubiquiti","Extreme",
       "Fortinet","Palo Alto","Sophos","Dell","Ruckus","Netgear","Cambium","Zyxel"
     ];
 
-    // Fetch commitments and line items in parallel
+    // Fetch commitments and line items in parallel, filtered by year
     const [comRes, lineRes] = await Promise.all([
-      supabase.from("commitments").select("spin_name, form_471_service_type_name, funding_commitment_request").not("spin_name","is",null),
+      supabase.from("commitments").select("spin_name, organization_name, form_471_service_type_name, funding_commitment_request").not("spin_name","is",null).eq("funding_year", fy),
       supabase.from("frn_line_items").select("form_471_manufacturer_name, other_manufacturer_desc, form_471_product_name, pre_discount_extended_eligible_line_item_costs").not("form_471_manufacturer_name","is",null),
     ]);
     if (comRes.error) throw comRes.error;
