@@ -1611,6 +1611,7 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
       results = allEntities.sort((a, b) =>
         (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
       );
+      console.log(`Results: ${results.length}, first:`, JSON.stringify(results[0]).slice(0, 300));
 
     } else {
       // ── Keywords-only strategy ────────────────────────────────────────────────
