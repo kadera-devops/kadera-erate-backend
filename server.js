@@ -1442,84 +1442,123 @@ Always query the database to give real, specific answers. Format dollar amounts 
 app.get("/api/contact-search", requireAuth, async (req, res) => {
   try {
     const { keywords, product, service_category, funding_year, limit = 500 } = req.query;
-    const kws = (keywords || "").trim();
-    const prod = (product || "").trim();
+    const kws  = (keywords || "").trim();
+    const prod = (product  || "").trim();
     if (!kws && !prod) {
       return res.status(400).json({ status:"error", message:"keywords or product required" });
     }
 
     const fy = funding_year || "2026";
+    let results = [];
 
-    // Step 1: Get matching 470s — if no keywords, fetch all
-    let query = supabase
-      .from("form_470s")
-      .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
-      .eq("funding_year", fy)
-      .order("billed_entity_name", { ascending: true })
-      .limit(Number(limit));
-
-    if (kws) {
-      const terms    = kws.split(",").map(k => k.trim()).filter(Boolean);
-      const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
-      query = query.or(orFilter);
-    }
-
-    if (service_category && service_category !== "ALL") {
-      query = query.ilike("service_category", `%${service_category}%`);
-    }
-
-    const { data, error } = await query;
-    if (error) throw error;
-
-    // Deduplicate by entity — keep most recent 470 per entity
-    const entityMap = {};
-    for (const r of data || []) {
-      const key = r.billed_entity_number || r.billed_entity_name;
-      if (!entityMap[key] || new Date(r.date_posted) > new Date(entityMap[key].date_posted)) {
-        entityMap[key] = r;
-      }
-    }
-    let results = Object.values(entityMap).sort((a, b) =>
-      (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
-    );
-
-    // Step 2: If product keyword provided, filter to only 470s whose services mention it
-    if (product && product.trim().length >= 2) {
-      const kw      = product.trim();
-      const appNums = results.map(r => r.application_number).filter(Boolean);
-      const matched = new Set();
+    if (prod) {
+      // ── Product-first strategy ────────────────────────────────────────────────
+      // 1. Search USAC services dataset for ALL records matching the product keyword
+      //    Use $limit=50000 and paginate via $offset to get everything
+      const matchedAppNums = new Set();
       const serviceDetails = {};
+      let offset = 0;
+      const PAGE = 5000;
 
-      // Batch USAC 470 services query in groups of 20
-      for (let i = 0; i < appNums.length; i += 20) {
-        const batch    = appNums.slice(i, i + 20);
-        const inClause = batch.map(n => `'${n}'`).join(",");
-        const where    = `application_number IN(${inClause})`;
-        const url      = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(where)}&$limit=500`;
+      while (true) {
+        const where = `manufacturer.ilike.%25${encodeURIComponent(prod)}%25` +
+          `&$limit=${PAGE}&$offset=${offset}` +
+          `&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
+        const url = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent(`manufacturer LIKE '%${prod}%'`)}&$limit=${PAGE}&$offset=${offset}&$select=application_number,service_type,function,manufacturer,number_of_entities,rfp_documents`;
         try {
           const r    = await fetch(url, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
           const rows = await r.json();
-          for (const row of rows || []) {
-            const text = [row.service_type, row.function, row.manufacturer, row.manufacturer_other_description]
-              .filter(Boolean).join(" ").toLowerCase();
-            if (text.includes(kw.toLowerCase())) {
-              matched.add(row.application_number);
-              if (!serviceDetails[row.application_number]) serviceDetails[row.application_number] = [];
-              const alreadyHas = serviceDetails[row.application_number].some(s => s.manufacturer === row.manufacturer && s.service_type === row.service_type);
-              if (!alreadyHas) serviceDetails[row.application_number].push({
-                service_type: row.service_type,
-                function:     row.function,
-                manufacturer: row.manufacturer,
-                entities:     row.number_of_entities,
-                rfp:          row.rfp_documents?.url || null,
-              });
-            }
+          if (!rows?.length) break;
+          for (const row of rows) {
+            matchedAppNums.add(row.application_number);
+            if (!serviceDetails[row.application_number]) serviceDetails[row.application_number] = [];
+            const already = serviceDetails[row.application_number].some(s => s.manufacturer === row.manufacturer && s.service_type === row.service_type);
+            if (!already) serviceDetails[row.application_number].push({
+              service_type: row.service_type,
+              function:     row.function,
+              manufacturer: row.manufacturer,
+              entities:     row.number_of_entities,
+              rfp:          row.rfp_documents?.url || null,
+            });
           }
-        } catch {}
+          if (rows.length < PAGE) break;
+          offset += PAGE;
+        } catch { break; }
       }
-      results = results
-        .filter(r => matched.has(r.application_number))
-        .map(r => ({ ...r, matched_services: serviceDetails[r.application_number] || [] }));
+
+      if (!matchedAppNums.size) {
+        return res.json({ status:"success", data:[], count:0 });
+      }
+
+      // 2. Look up those app numbers in form_470s, filtering by keywords + fy
+      const appArr = [...matchedAppNums];
+      const BATCH  = 100;
+      const allRows = [];
+
+      for (let i = 0; i < appArr.length; i += BATCH) {
+        const batch = appArr.slice(i, i + BATCH);
+        let q = supabase
+          .from("form_470s")
+          .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
+          .eq("funding_year", fy)
+          .in("application_number", batch);
+
+        if (kws) {
+          const terms    = kws.split(",").map(k => k.trim()).filter(Boolean);
+          const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
+          q = q.or(orFilter);
+        }
+        if (service_category && service_category !== "ALL") {
+          q = q.ilike("service_category", `%${service_category}%`);
+        }
+
+        const { data: batch_data } = await q;
+        allRows.push(...(batch_data || []));
+      }
+
+      // Deduplicate by entity
+      const entityMap = {};
+      for (const r of allRows) {
+        const key = r.billed_entity_number || r.billed_entity_name;
+        if (!entityMap[key] || new Date(r.date_posted) > new Date(entityMap[key].date_posted)) {
+          entityMap[key] = { ...r, matched_services: serviceDetails[r.application_number] || [] };
+        }
+      }
+
+      results = Object.values(entityMap).sort((a, b) =>
+        (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
+      );
+
+    } else {
+      // ── Keywords-only strategy ────────────────────────────────────────────────
+      const terms    = kws.split(",").map(k => k.trim()).filter(Boolean);
+      const orFilter = terms.map(t => `billed_entity_name.ilike.%${t}%`).join(",");
+
+      let q = supabase
+        .from("form_470s")
+        .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
+        .eq("funding_year", fy)
+        .or(orFilter)
+        .order("billed_entity_name", { ascending: true })
+        .limit(Number(limit));
+
+      if (service_category && service_category !== "ALL") {
+        q = q.ilike("service_category", `%${service_category}%`);
+      }
+
+      const { data, error } = await q;
+      if (error) throw error;
+
+      const entityMap = {};
+      for (const r of data || []) {
+        const key = r.billed_entity_number || r.billed_entity_name;
+        if (!entityMap[key] || new Date(r.date_posted) > new Date(entityMap[key].date_posted)) {
+          entityMap[key] = r;
+        }
+      }
+      results = Object.values(entityMap).sort((a, b) =>
+        (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
+      );
     }
 
     res.json({ status:"success", data: results, count: results.length });
