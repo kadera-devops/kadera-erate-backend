@@ -683,6 +683,37 @@ app.get("/api/470-detail", requireAuth, async (req, res) => {
   }
 });
 
+// ── TEMP: contact-search diagnostic ─────────────────────────────────────────
+app.get("/api/diag-contact-search", async (req, res) => {
+  try {
+    const prod = req.query.prod || "Ubiquiti";
+    const fy   = req.query.fy   || "2026";
+
+    // Test 1: services with year filter
+    const url1 = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent("manufacturer like '%" + prod + "%' AND funding_year='" + fy + "'")}&$limit=3&$select=application_number,manufacturer,funding_year`;
+    const r1   = await fetch(url1, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const d1   = await r1.json();
+
+    // Test 2: services without year filter
+    const url2 = `${USAC_BASE}/39tn-hjzv.json?$where=${encodeURIComponent("manufacturer like '%" + prod + "%'")}&$limit=3&$select=application_number,manufacturer,funding_year`;
+    const r2   = await fetch(url2, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const d2   = await r2.json();
+
+    // Test 3: count without year filter
+    const url3 = `${USAC_BASE}/39tn-hjzv.json?$select=count(application_number)&$where=${encodeURIComponent("manufacturer like '%" + prod + "%'")}`;
+    const r3   = await fetch(url3, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
+    const d3   = await r3.json();
+
+    res.json({
+      withYear:    { url: url1, result: d1 },
+      withoutYear: { url: url2, result: d2 },
+      count:       { url: url3, result: d3 },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── TEMP: C2 budget raw diagnostic ───────────────────────────────────────────
 app.get("/api/diag-c2", async (req, res) => {
   try {
@@ -1492,56 +1523,94 @@ app.get("/api/contact-search", requireAuth, async (req, res) => {
         return res.json({ status:"success", data:[], count:0 });
       }
 
-      // 2. Look up those app numbers from USAC master 470 dataset (jp7a-89nd)
-      //    This gives us entity name, BEN, and tech contact regardless of our local DB
+      // 2. Check our local form_470s first (fast), then fill gaps from USAC master
       const appArr = [...matchedAppNums];
-      const USAC_BATCH = 50;
-      const allRows = [];
+      const entityMap = {};
 
-      for (let i = 0; i < appArr.length; i += USAC_BATCH) {
-        const batch    = appArr.slice(i, i + USAC_BATCH);
+      // Local DB lookup in batches of 100 — no keyword filter so we get everything
+      const LOCAL_BATCH = 100;
+      for (let i = 0; i < appArr.length; i += LOCAL_BATCH) {
+        const batch = appArr.slice(i, i + LOCAL_BATCH);
+        let q = supabase
+          .from("form_470s")
+          .select("application_number, billed_entity_name, billed_entity_number, state, service_category, application_status, bid_due_date, date_posted, tech_contact_name, tech_contact_email, tech_contact_phone, funding_year")
+          .in("application_number", batch);
+        const { data: localRows } = await q;
+        for (const r of localRows || []) {
+          const key = r.application_number;
+          if (!entityMap[key]) {
+            entityMap[key] = {
+              application_number: r.application_number,
+              billed_entity_name: r.billed_entity_name,
+              billed_entity_number: r.billed_entity_number,
+              state: r.state,
+              service_category: r.service_category,
+              application_status: r.application_status,
+              bid_due_date: r.bid_due_date,
+              tech_contact_name: r.tech_contact_name,
+              tech_contact_email: r.tech_contact_email,
+              tech_contact_phone: r.tech_contact_phone,
+              matched_services: serviceDetails[r.application_number] || [],
+              source: "local",
+            };
+          }
+        }
+      }
+
+      // For app numbers NOT in local DB, fetch from USAC master in smaller batches
+      const missing = appArr.filter(n => !entityMap[n]);
+      console.log(`Local DB: ${appArr.length - missing.length} found, ${missing.length} need USAC lookup`);
+
+      // Cap USAC fallback — take first 200 missing to avoid timeout
+      const missingCapped = missing.slice(0, 200);
+      const USAC_BATCH = 20;
+      for (let i = 0; i < missingCapped.length; i += USAC_BATCH) {
+        const batch    = missingCapped.slice(i, i + USAC_BATCH);
         const inClause = batch.map(n => `'${n}'`).join(",");
-        let whereStr   = `application_number IN(${inClause})`;
-        if (kws) {
-          const terms = kws.split(",").map(k => k.trim()).filter(Boolean);
-          const nameFilter = terms.map(t => `billed_entity_name like '%${t}%'`).join(" OR ");
-          whereStr += ` AND (${nameFilter})`;
-        }
-        if (service_category && service_category !== "ALL") {
-          whereStr += ` AND category_of_service like '%${service_category}%'`;
-        }
-        const usacUrl = `${USAC_BASE}/jp7a-89nd.json?$where=${encodeURIComponent(whereStr)}&$limit=${USAC_BATCH * 2}&$select=application_number,billed_entity_name,billed_entity_number,billed_entity_state,fcc_form_470_status,allowable_contract_date,certified_date_time,technical_contact_name,technical_contact_email,technical_contact_phone,category_of_service,funding_year`;
+        const whereStr = `application_number IN(${inClause})`;
+        const usacUrl  = `${USAC_BASE}/jp7a-89nd.json?$where=${encodeURIComponent(whereStr)}&$limit=${USAC_BATCH * 3}&$select=application_number,billed_entity_name,billed_entity_number,billed_entity_state,fcc_form_470_status,allowable_contract_date,technical_contact_name,technical_contact_email,technical_contact_phone,category_of_service,funding_year`;
         try {
           const r    = await fetch(usacUrl, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
           const rows = await r.json();
-          if (Array.isArray(rows)) allRows.push(...rows);
-        } catch {}
+          for (const r2 of Array.isArray(rows) ? rows : []) {
+            const key = r2.application_number;
+            if (key && !entityMap[key]) {
+              entityMap[key] = {
+                application_number: key,
+                billed_entity_name: r2.billed_entity_name,
+                billed_entity_number: r2.billed_entity_number,
+                state: r2.billed_entity_state,
+                service_category: r2.category_of_service,
+                application_status: r2.fcc_form_470_status,
+                bid_due_date: r2.allowable_contract_date,
+                tech_contact_name: r2.technical_contact_name,
+                tech_contact_email: r2.technical_contact_email,
+                tech_contact_phone: r2.technical_contact_phone,
+                matched_services: serviceDetails[key] || [],
+                source: "usac",
+              };
+            }
+          }
+        } catch (e) { console.error("USAC master batch error:", e.message); }
       }
 
-      // Deduplicate by entity, normalize USAC master field names
-      const entityMap = {};
-      for (const r of allRows) {
-        const key = r.billed_entity_number || r.billed_entity_name;
-        if (!key) continue;
-        if (!entityMap[key]) {
-          entityMap[key] = {
-            application_number:   r.application_number,
-            billed_entity_name:   r.billed_entity_name,
-            billed_entity_number: r.billed_entity_number,
-            state:                r.billed_entity_state || r.state,
-            service_category:     r.category_of_service || r.service_category,
-            application_status:   r.fcc_form_470_status || r.application_status,
-            bid_due_date:         r.allowable_contract_date || r.bid_due_date,
-            tech_contact_name:    r.technical_contact_name  || r.tech_contact_name,
-            tech_contact_email:   r.technical_contact_email || r.tech_contact_email,
-            tech_contact_phone:   r.technical_contact_phone || r.tech_contact_phone,
-            matched_services:     serviceDetails[r.application_number] || [],
-          };
-        }
+      // Apply keyword filter on entity name if provided
+      let allEntities = Object.values(entityMap).filter(r => r.billed_entity_name);
+      if (kws) {
+        const terms = kws.split(",").map(k => k.trim().toLowerCase()).filter(Boolean);
+        allEntities = allEntities.filter(r =>
+          terms.some(t => (r.billed_entity_name || "").toLowerCase().includes(t))
+        );
+      }
+      if (service_category && service_category !== "ALL") {
+        allEntities = allEntities.filter(r =>
+          (r.service_category || "").toLowerCase().includes(service_category.toLowerCase())
+        );
       }
 
-      results = Object.values(entityMap)
-        .sort((a, b) => (a.billed_entity_name || "").localeCompare(b.billed_entity_name || ""));
+      results = allEntities.sort((a, b) =>
+        (a.billed_entity_name || "").localeCompare(b.billed_entity_name || "")
+      );
 
     } else {
       // ── Keywords-only strategy ────────────────────────────────────────────────
