@@ -895,15 +895,39 @@ app.get("/api/competitive-intel", requireAuth, async (req, res) => {
       "Fortinet","Palo Alto","Sophos","Dell","Ruckus","Netgear","Cambium","Zyxel"
     ];
 
-    // Fetch commitments and line items in parallel, filtered by year
-    const [comRes, lineRes] = await Promise.all([
-      supabase.from("commitments").select("spin_name, organization_name, form_471_service_type_name, funding_commitment_request").not("spin_name","is",null).eq("funding_year", fy),
-      supabase.from("frn_line_items").select("form_471_manufacturer_name, other_manufacturer_desc, form_471_product_name, pre_discount_extended_eligible_line_item_costs").not("form_471_manufacturer_name","is",null),
-    ]);
-    if (comRes.error) throw comRes.error;
+    // Fetch ALL commitments for the year — paginate to bypass Supabase 1000 row limit
+    const commitments = [];
+    const PAGE_SIZE   = 1000;
+    let   page        = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from("commitments")
+        .select("spin_name, organization_name, form_471_service_type_name, funding_commitment_request")
+        .not("spin_name", "is", null)
+        .eq("funding_year", fy)
+        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+      if (error) throw error;
+      if (!data?.length) break;
+      commitments.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      page++;
+    }
+    console.log(`competitive-intel FY${fy}: fetched ${commitments.length} commitments`);
 
-    const commitments = comRes.data || [];
-    const lineItems   = lineRes.data || [];
+    // Line items (FY2025 only — not year-filtered)
+    const lineItems = [];
+    let liPage = 0;
+    while (true) {
+      const { data } = await supabase
+        .from("frn_line_items")
+        .select("form_471_manufacturer_name, other_manufacturer_desc, form_471_product_name, pre_discount_extended_eligible_line_item_costs")
+        .not("form_471_manufacturer_name", "is", null)
+        .range(liPage * PAGE_SIZE, (liPage + 1) * PAGE_SIZE - 1);
+      if (!data?.length) break;
+      lineItems.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      liPage++;
+    }
 
     // Top 25 providers by commitment count
     const providerMap = {};
