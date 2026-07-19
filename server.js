@@ -1862,6 +1862,311 @@ app.get("/api/tags/keyword-search", requireAuth, async (req, res) => {
   }
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// RENEWALS MODULE — customers, subscriptions, financials, 60/30-day alerts
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Calendar-safe month addition (Jan 31 + 1mo → Feb 28)
+function addMonths(dateStr, months) {
+  const d = new Date(dateStr + "T00:00:00Z");
+  const day = d.getUTCDate();
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDay));
+  return d.toISOString().slice(0, 10);
+}
+
+// Normalize a subscription's revenue/cost to monthly dollars
+function subMonthly(s) {
+  const rev  = Number(s.quantity) * Number(s.unit_price);
+  const cost = Number(s.quantity) * Number(s.unit_cost);
+  if (s.billing_frequency === "annual")   return { rev: rev / 12, cost: cost / 12 };
+  if (s.billing_frequency === "one_time") return { rev: 0, cost: 0 };
+  return { rev, cost };
+}
+
+// ── Customers ─────────────────────────────────────────────────────────────────
+app.get("/api/customers", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("customers").select("*").order("name");
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.post("/api/customers", requireAuth, async (req, res) => {
+  try {
+    const { name, ben, contact_name, contact_email, contact_phone, notes } = req.body;
+    if (!name?.trim()) return res.status(400).json({ status:"error", message:"name required" });
+    const { data, error } = await supabase.from("customers")
+      .insert({ name: name.trim(), ben, contact_name, contact_email, contact_phone, notes })
+      .select().single();
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.patch("/api/customers/:id", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase.from("customers").update(req.body).eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ status:"success" });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+// ── Subscriptions CRUD ────────────────────────────────────────────────────────
+app.get("/api/subscriptions", requireAuth, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let q = supabase.from("subscriptions")
+      .select("*, customers(name, contact_email)")
+      .order("renewal_date", { ascending: true });
+    if (status && status !== "all") q = q.eq("status", status);
+    const { data, error } = await q;
+    if (error) throw error;
+    const rows = (data || []).map(s => {
+      const m = subMonthly(s);
+      return {
+        ...s,
+        customer_name: s.customers?.name || null,
+        monthly_revenue: Math.round(m.rev * 100) / 100,
+        monthly_cost:    Math.round(m.cost * 100) / 100,
+        monthly_gp:      Math.round((m.rev - m.cost) * 100) / 100,
+        period_revenue:  Math.round(Number(s.quantity) * Number(s.unit_price) * 100) / 100,
+        period_cost:     Math.round(Number(s.quantity) * Number(s.unit_cost) * 100) / 100,
+      };
+    });
+    res.json({ status:"success", data: rows });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.post("/api/subscriptions", requireAuth, async (req, res) => {
+  try {
+    const b = req.body;
+    if (!b.customer_id)  return res.status(400).json({ status:"error", message:"customer_id required" });
+    if (!b.product_name) return res.status(400).json({ status:"error", message:"product_name required" });
+    if (!b.go_live_date) return res.status(400).json({ status:"error", message:"go_live_date required" });
+    const term = Number(b.term_months) || 12;
+    const renewal = b.renewal_date || addMonths(b.go_live_date, term);
+    const { data, error } = await supabase.from("subscriptions").insert({
+      customer_id:       b.customer_id,
+      product_name:      b.product_name.trim(),
+      category:          b.category || null,
+      vendor:            b.vendor || null,
+      go_live_date:      b.go_live_date,
+      term_months:       term,
+      renewal_date:      renewal,
+      auto_renew:        !!b.auto_renew,
+      billing_frequency: b.billing_frequency || "monthly",
+      quantity:          Number(b.quantity) || 1,
+      unit_cost:         Number(b.unit_cost) || 0,
+      unit_price:        Number(b.unit_price) || 0,
+      status:            b.status || "active",
+      notes:             b.notes || null,
+    }).select().single();
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.patch("/api/subscriptions/:id", requireAuth, async (req, res) => {
+  try {
+    const b = { ...req.body, updated_at: new Date().toISOString() };
+    // If go_live/term changed and renewal_date not explicitly provided, recompute
+    if ((b.go_live_date || b.term_months) && !b.renewal_date) {
+      const { data: cur } = await supabase.from("subscriptions").select("go_live_date, term_months").eq("id", req.params.id).single();
+      if (cur) b.renewal_date = addMonths(b.go_live_date || cur.go_live_date, Number(b.term_months || cur.term_months));
+    }
+    delete b.customers; delete b.customer_name;
+    delete b.monthly_revenue; delete b.monthly_cost; delete b.monthly_gp;
+    delete b.period_revenue; delete b.period_cost;
+    const { error } = await supabase.from("subscriptions").update(b).eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ status:"success" });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.post("/api/subscriptions/:id/renew", requireAuth, async (req, res) => {
+  try {
+    const { data: cur, error: gErr } = await supabase.from("subscriptions")
+      .select("renewal_date, term_months, notes").eq("id", req.params.id).single();
+    if (gErr || !cur) throw gErr || new Error("not found");
+    const next = addMonths(cur.renewal_date, Number(cur.term_months));
+    const note = `Renewed ${new Date().toISOString().slice(0,10)}: ${cur.renewal_date} → ${next}`;
+    const { error } = await supabase.from("subscriptions").update({
+      renewal_date: next,
+      status: "active",
+      notes: cur.notes ? cur.notes + "\n" + note : note,
+      updated_at: new Date().toISOString(),
+    }).eq("id", req.params.id);
+    if (error) throw error;
+    // Clear this cycle's alert log so next cycle alerts fire fresh
+    await supabase.from("renewal_alerts").delete().eq("subscription_id", req.params.id);
+    res.json({ status:"success", renewal_date: next });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase.from("subscriptions").delete().eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ status:"success" });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+// ── Financial summary + 12-month chart data ──────────────────────────────────
+app.get("/api/subscriptions/summary", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("subscriptions")
+      .select("*, customers(name)").eq("status", "active");
+    if (error) throw error;
+    const subs = data || [];
+
+    let mrr = 0, mcost = 0, oneTime = 0;
+    for (const s of subs) {
+      const m = subMonthly(s);
+      mrr += m.rev; mcost += m.cost;
+      if (s.billing_frequency === "one_time") oneTime += Number(s.quantity) * Number(s.unit_price);
+    }
+    const gp = mrr - mcost;
+
+    // 12-month forward view
+    const today = new Date(); today.setUTCHours(0,0,0,0);
+    const months = [];
+    for (let i = 0; i < 12; i++) {
+      const mDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + i, 1));
+      const key = mDate.toISOString().slice(0, 7);
+      months.push({ month: key, renewals_count: 0, renewal_mrr: 0, min_days: null });
+    }
+    let atRisk90 = 0;
+    for (const s of subs) {
+      const rd = new Date(s.renewal_date + "T00:00:00Z");
+      const daysLeft = Math.ceil((rd - today) / 86400000);
+      const key = s.renewal_date.slice(0, 7);
+      const slot = months.find(m => m.month === key);
+      const m = subMonthly(s);
+      if (slot) {
+        slot.renewals_count += 1;
+        slot.renewal_mrr += m.rev;
+        if (slot.min_days === null || daysLeft < slot.min_days) slot.min_days = daysLeft;
+      }
+      if (daysLeft >= 0 && daysLeft <= 90) atRisk90 += m.rev;
+    }
+    for (const m of months) m.renewal_mrr = Math.round(m.renewal_mrr * 100) / 100;
+
+    res.json({ status:"success", data: {
+      active_count:     subs.length,
+      monthly_revenue:  Math.round(mrr * 100) / 100,
+      monthly_cost:     Math.round(mcost * 100) / 100,
+      gross_profit:     Math.round(gp * 100) / 100,
+      gross_margin_pct: mrr > 0 ? Math.round((gp / mrr) * 1000) / 10 : 0,
+      arr:              Math.round(mrr * 12),
+      one_time_total:   Math.round(oneTime * 100) / 100,
+      revenue_at_risk_90d: Math.round(atRisk90 * 100) / 100,
+      months,
+    }});
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+// ── Alert engine — daily 60/30-day renewal emails via Resend ─────────────────
+async function sendRenewalEmail(items, alertType) {
+  const key = process.env.RESEND_API_KEY;
+  const to  = (process.env.ALERT_EMAIL_TO || "").split(",").map(e => e.trim()).filter(Boolean);
+  if (!key || !to.length) { console.log("Renewal alerts: RESEND_API_KEY or ALERT_EMAIL_TO not set — skipping email"); return false; }
+  const from = process.env.ALERT_FROM || "Kadera Renewals <onboarding@resend.dev>";
+  const label = alertType === "60_day" ? "60-day" : "30-day";
+  const rows = items.map(s => `
+    <tr>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-weight:600">${s.customers?.name || "—"}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${s.product_name}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#dc2626;font-weight:600">${s.renewal_date}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${s.term_months} mo</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:right">$${(Number(s.quantity)*Number(s.unit_price)).toLocaleString()}</td>
+    </tr>`).join("");
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:640px">
+      <h2 style="color:#0f1e3d">⚠️ ${label} renewal alert${items.length > 1 ? "s" : ""}</h2>
+      <p>${items.length} subscription${items.length > 1 ? "s" : ""} renewing within ${label === "60-day" ? 60 : 30} days:</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr style="background:#f8fafc">
+          <th style="padding:8px 12px;text-align:left">Customer</th>
+          <th style="padding:8px 12px;text-align:left">Product</th>
+          <th style="padding:8px 12px;text-align:left">Renews</th>
+          <th style="padding:8px 12px;text-align:left">Term</th>
+          <th style="padding:8px 12px;text-align:right">Period price</th>
+        </tr>${rows}
+      </table>
+      <p style="color:#64748b;font-size:12px;margin-top:16px">Sent by the Kadera Renewals tracker.</p>
+    </div>`;
+  try {
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to, subject: `⚠️ ${label} renewal: ${items.length} subscription${items.length > 1 ? "s" : ""} expiring soon`, html }),
+    });
+    const out = await r.json();
+    if (!r.ok) { console.error("Resend error:", JSON.stringify(out)); return false; }
+    console.log(`Renewal alert email sent (${alertType}, ${items.length} items)`);
+    return true;
+  } catch (e) { console.error("Resend send error:", e.message); return false; }
+}
+
+async function checkRenewalAlerts() {
+  try {
+    const today = new Date(); today.setUTCHours(0,0,0,0);
+    const horizon = new Date(today); horizon.setUTCDate(horizon.getUTCDate() + 60);
+    const { data: subs, error } = await supabase.from("subscriptions")
+      .select("*, customers(name)")
+      .eq("status", "active")
+      .gte("renewal_date", today.toISOString().slice(0,10))
+      .lte("renewal_date", horizon.toISOString().slice(0,10));
+    if (error) throw error;
+    if (!subs?.length) { console.log("Renewal alerts: nothing within 60 days"); return; }
+
+    const ids = subs.map(s => s.id);
+    const { data: sent } = await supabase.from("renewal_alerts").select("subscription_id, alert_type").in("subscription_id", ids);
+    const sentSet = new Set((sent || []).map(a => `${a.subscription_id}|${a.alert_type}`));
+
+    const due60 = [], due30 = [];
+    for (const s of subs) {
+      const daysLeft = Math.ceil((new Date(s.renewal_date + "T00:00:00Z") - today) / 86400000);
+      if (daysLeft <= 30 && !sentSet.has(`${s.id}|30_day`)) due30.push(s);
+      else if (daysLeft <= 60 && !sentSet.has(`${s.id}|60_day`)) due60.push(s);
+    }
+
+    const toAddr = process.env.ALERT_EMAIL_TO || "";
+    if (due60.length && await sendRenewalEmail(due60, "60_day")) {
+      await supabase.from("renewal_alerts").upsert(
+        due60.map(s => ({ subscription_id: s.id, alert_type: "60_day", sent_to: toAddr })),
+        { onConflict: "subscription_id,alert_type", ignoreDuplicates: true });
+    }
+    if (due30.length && await sendRenewalEmail(due30, "30_day")) {
+      await supabase.from("renewal_alerts").upsert(
+        due30.map(s => ({ subscription_id: s.id, alert_type: "30_day", sent_to: toAddr })),
+        { onConflict: "subscription_id,alert_type", ignoreDuplicates: true });
+    }
+    console.log(`Renewal alerts run: ${due60.length} sixty-day, ${due30.length} thirty-day`);
+  } catch (e) { console.error("checkRenewalAlerts error:", e.message); }
+}
+
+cron.schedule("0 13 * * *", checkRenewalAlerts); // 13:00 UTC ≈ 7/8am CT daily
+
+// Manual trigger + sent-alert log for the UI
+app.post("/api/renewal-alerts/run", requireAuth, async (req, res) => {
+  await checkRenewalAlerts();
+  res.json({ status:"success" });
+});
+app.get("/api/renewal-alerts", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("renewal_alerts")
+      .select("*, subscriptions(product_name, renewal_date, customers(name))")
+      .order("sent_at", { ascending: false }).limit(50);
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
 
 app.listen(PORT, () => {
   console.log("============================================");
