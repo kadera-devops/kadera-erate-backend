@@ -2167,6 +2167,58 @@ app.get("/api/renewal-alerts", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// RUNBOOK LOGGING — technicians record completed maintenance checklists
+// ═════════════════════════════════════════════════════════════════════════════
+
+app.post("/api/runbook/runs", requireAuth, async (req, res) => {
+  try {
+    const { cadence, items, notes } = req.body;
+    if (!cadence)          return res.status(400).json({ status:"error", message:"cadence required" });
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ status:"error", message:"items required" });
+    const checked = items.filter(i => i.checked || i.na).length;
+    const total   = items.length;
+    const { data, error } = await supabase.from("runbook_runs").insert({
+      user_id:       req.user.id,
+      user_email:    req.user.email || null,
+      cadence,
+      items,
+      checked_count: checked,
+      total_count:   total,
+      complete:      checked === total,
+      notes:         notes || null,
+    }).select().single();
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.get("/api/runbook/runs", requireAuth, async (req, res) => {
+  try {
+    const { cadence, limit = 100 } = req.query;
+    let q = supabase.from("runbook_runs").select("*").order("completed_at", { ascending: false }).limit(Number(limit));
+    if (cadence && cadence !== "all") q = q.eq("cadence", cadence);
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+// Last completed run per cadence — powers the "last done" indicators
+app.get("/api/runbook/status", requireAuth, async (req, res) => {
+  try {
+    const cadences = ["daily","weekly","monthly","quarterly"];
+    const out = {};
+    for (const c of cadences) {
+      const { data } = await supabase.from("runbook_runs")
+        .select("completed_at, user_email, checked_count, total_count, complete")
+        .eq("cadence", c).order("completed_at", { ascending: false }).limit(1);
+      out[c] = data?.[0] || null;
+    }
+    res.json({ status:"success", data: out });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
 
 app.listen(PORT, () => {
   console.log("============================================");
