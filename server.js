@@ -2171,9 +2171,38 @@ app.get("/api/renewal-alerts", requireAuth, async (req, res) => {
 // RUNBOOK LOGGING — technicians record completed maintenance checklists
 // ═════════════════════════════════════════════════════════════════════════════
 
+// ── Tenants (managed clients) ─────────────────────────────────────────────────
+app.get("/api/tenants", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("tenants").select("*").order("name");
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.post("/api/tenants", requireAuth, async (req, res) => {
+  try {
+    const { name, notes } = req.body;
+    if (!name?.trim()) return res.status(400).json({ status:"error", message:"name required" });
+    const { data, error } = await supabase.from("tenants").insert({ name: name.trim(), notes: notes || null }).select().single();
+    if (error) throw error;
+    res.json({ status:"success", data });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+app.patch("/api/tenants/:id", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase.from("tenants").update(req.body).eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ status:"success" });
+  } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
+});
+
+// ── Runbook runs (tenant-aware) ───────────────────────────────────────────────
 app.post("/api/runbook/runs", requireAuth, async (req, res) => {
   try {
-    const { cadence, items, notes } = req.body;
+    const { cadence, items, notes, tenant_id } = req.body;
+    if (!tenant_id)        return res.status(400).json({ status:"error", message:"tenant_id required" });
     if (!cadence)          return res.status(400).json({ status:"error", message:"cadence required" });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ status:"error", message:"items required" });
     const checked = items.filter(i => i.checked || i.na).length;
@@ -2181,6 +2210,7 @@ app.post("/api/runbook/runs", requireAuth, async (req, res) => {
     const { data, error } = await supabase.from("runbook_runs").insert({
       user_id:       req.user.id,
       user_email:    req.user.email || null,
+      tenant_id,
       cadence,
       items,
       checked_count: checked,
@@ -2195,24 +2225,29 @@ app.post("/api/runbook/runs", requireAuth, async (req, res) => {
 
 app.get("/api/runbook/runs", requireAuth, async (req, res) => {
   try {
-    const { cadence, limit = 100 } = req.query;
-    let q = supabase.from("runbook_runs").select("*").order("completed_at", { ascending: false }).limit(Number(limit));
-    if (cadence && cadence !== "all") q = q.eq("cadence", cadence);
+    const { cadence, tenant_id, limit = 100 } = req.query;
+    let q = supabase.from("runbook_runs").select("*, tenants(name)").order("completed_at", { ascending: false }).limit(Number(limit));
+    if (cadence && cadence !== "all")   q = q.eq("cadence", cadence);
+    if (tenant_id && tenant_id !== "all") q = q.eq("tenant_id", tenant_id);
     const { data, error } = await q;
     if (error) throw error;
-    res.json({ status:"success", data });
+    const rows = (data || []).map(r => ({ ...r, tenant_name: r.tenants?.name || null }));
+    res.json({ status:"success", data: rows });
   } catch (err) { res.status(500).json({ status:"error", message: err.message }); }
 });
 
-// Last completed run per cadence — powers the "last done" indicators
+// Last completed run per cadence FOR A TENANT — powers the "last done" indicators
 app.get("/api/runbook/status", requireAuth, async (req, res) => {
   try {
+    const { tenant_id } = req.query;
+    if (!tenant_id) return res.json({ status:"success", data: {} });
     const cadences = ["daily","weekly","monthly","quarterly"];
     const out = {};
     for (const c of cadences) {
       const { data } = await supabase.from("runbook_runs")
         .select("completed_at, user_email, checked_count, total_count, complete")
-        .eq("cadence", c).order("completed_at", { ascending: false }).limit(1);
+        .eq("cadence", c).eq("tenant_id", tenant_id)
+        .order("completed_at", { ascending: false }).limit(1);
       out[c] = data?.[0] || null;
     }
     res.json({ status:"success", data: out });
