@@ -29,7 +29,7 @@ app.use(express.json());
 
 // ── USAC Open Data API config ─────────────────────────────────────────────────
 const USAC_BASE = "https://opendata.usac.org/resource";
-const CURRENT_FY = "2026";
+const CURRENT_FY = "2027";
 
 const USAC_APP_TOKEN = process.env.USAC_APP_TOKEN || "";
 
@@ -311,7 +311,7 @@ app.get("/api/diag-line-items", async (req, res) => {
     ]);
 
     // Also sample the raw USAC API with no state filter to see real field values
-    const rawUrl  = `${USAC_BASE}/hbj5-2bpj.json?funding_year=2026&$limit=2`;
+    const rawUrl  = `${USAC_BASE}/hbj5-2bpj.json?funding_year=2027&$limit=2`;
     const rawRes  = await fetch(rawUrl, { headers:{ "X-App-Token": USAC_APP_TOKEN } });
     const rawData = await rawRes.json();
 
@@ -704,7 +704,7 @@ app.get("/api/470-detail", requireAuth, async (req, res) => {
           consultant_phone:     raw.consultant_phone     || null,
           rfp_document_url:     raw.rfp_document_url     || raw.rfp_url || raw.document_url || null,
           // Build USAC direct links
-          usac_url:             `https://forms.universalservice.org/portal/form470/view/formSummary?fn=${app_num}&fy=${row.funding_year || 2026}`,
+          usac_url:             `https://forms.universalservice.org/portal/form470/view/formSummary?fn=${app_num}&fy=${row.funding_year || 2027}`,
           epc_url:              `https://portal.usac.org/suite/#/470/${app_num}`,
           ffl_url:              `https://legacy.fundsforlearning.com/470/${app_num}`,
           // All raw for reference
@@ -743,7 +743,7 @@ app.get("/api/470-detail", requireAuth, async (req, res) => {
         narrative:            d.form_nickname,
         narrative_description: d.narrative_description || d.service_narrative,
         rfp_document_url:     d.rfp_document_url || d.rfp_url || d.document_url,
-        usac_url:             `https://forms.universalservice.org/portal/form470/view/formSummary?fn=${d.application_number}&fy=${d.funding_year || 2026}`,
+        usac_url:             `https://forms.universalservice.org/portal/form470/view/formSummary?fn=${d.application_number}&fy=${d.funding_year || 2027}`,
         epc_url:              `https://portal.usac.org/suite/#/470/${d.application_number}`,
         ffl_url:              `https://legacy.fundsforlearning.com/470/${d.application_number}`,
         raw: d,
