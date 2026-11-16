@@ -9,10 +9,19 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 // ── Supabase ─────────────────────────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://myeucmajiebssqmphzjm.supabase.co";
+
+// Data client — uses the service-role key, which bypasses RLS by design.
+// Falls back to the anon key if the service key isn't set (so nothing breaks
+// before the env var is added), but for RLS to be enforced you MUST set
+// SUPABASE_SERVICE_ROLE_KEY in Railway.
 const supabase = createClient(
-  process.env.SUPABASE_URL || "https://myeucmajiebssqmphzjm.supabase.co",
-  process.env.SUPABASE_ANON_KEY
+  SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY
 );
+
+// Auth client — anon key, used only to verify incoming user JWTs.
+const supabaseAuth = createClient(SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
@@ -228,23 +237,57 @@ async function syncLineItems() {
   }
 }
 
-async function syncAll() {
-  console.log("=== Starting full USAC sync ===");
-  await sync470s();
-  await sync471s();
-  await syncCommitments();
-  await syncLineItems();
-  console.log("=== USAC sync complete ===");
+// ── Sync concurrency guard ────────────────────────────────────────────────────
+// Prevents overlapping syncs. Without this, the cron, /api/sync-now, /api/sync,
+// AND any extra Railway instance can each kick off syncAll() at the same time,
+// producing the duplicate back-to-back syncs seen in the logs and causing
+// concurrent upserts + USAC rate-limiting.
+let syncState = { running: false, startedAt: null, lastFinishedAt: null, lastResult: null, lastError: null };
+
+async function syncAll(trigger = "unknown") {
+  if (syncState.running) {
+    const ranFor = syncState.startedAt ? Math.round((Date.now() - syncState.startedAt) / 1000) : 0;
+    console.log(`=== Sync SKIPPED (already running for ${ranFor}s, trigger: ${trigger}) ===`);
+    return { skipped: true, reason: "already_running", runningForSeconds: ranFor };
+  }
+  syncState = { ...syncState, running: true, startedAt: Date.now(), lastError: null };
+  console.log(`=== Starting full USAC sync (trigger: ${trigger}) ===`);
+  try {
+    await sync470s();
+    await sync471s();
+    await syncCommitments();
+    await syncLineItems();
+    console.log("=== USAC sync complete ===");
+    syncState.lastResult = "success";
+  } catch (err) {
+    console.error("=== USAC sync FAILED ===", err.message);
+    syncState.lastResult = "error";
+    syncState.lastError = err.message;
+  } finally {
+    syncState.running = false;
+    syncState.lastFinishedAt = Date.now();
+  }
+  return { skipped: false, result: syncState.lastResult };
 }
 
-// ── Daily cron: 2am CT ────────────────────────────────────────────────────────
-cron.schedule("0 8 * * *", syncAll); // 8am UTC = 2am CT
+// ── Daily scheduler ──────────────────────────────────────────────────────────
+// In-process node-cron is unreliable on Railway: it only fires while the process
+// is awake, restarts on every redeploy, and runs ONCE PER INSTANCE (so multiple
+// replicas = multiple daily syncs). Set DISABLE_INTERNAL_CRON=true in Railway and
+// drive the sync from an external scheduler hitting GET /api/sync-now instead.
+// The concurrency guard above makes it safe either way.
+if (process.env.DISABLE_INTERNAL_CRON === "true") {
+  console.log("Internal cron DISABLED — expecting an external scheduler to call /api/sync-now");
+} else {
+  cron.schedule("0 8 * * *", () => syncAll("internal-cron")); // 8am UTC = 2am CT
+  console.log("Internal daily sync cron scheduled for 08:00 UTC");
+}
 
 // ── AUTH middleware ───────────────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace("Bearer ", "");
   if (!token) return res.status(401).json({ status: "error", message: "Unauthorized" });
-  const { data: { user }, error } = await supabase.auth.getUser(token);
+  const { data: { user }, error } = await supabaseAuth.auth.getUser(token);
   if (error || !user) return res.status(401).json({ status: "error", message: "Unauthorized" });
   req.user = user;
   next();
@@ -282,15 +325,43 @@ app.get("/api/diag-line-items", async (req, res) => {
   }
 });
 
+// External scheduler entry point. If SYNC_SECRET is set in Railway, the caller
+// must pass ?key=<SYNC_SECRET> (so a stray health-check pinger can't trigger a
+// full sync). If SYNC_SECRET is unset, it stays open for backward compatibility.
 app.get("/api/sync-now", async (req, res) => {
+  const secret = process.env.SYNC_SECRET;
+  if (secret && req.query.key !== secret) {
+    return res.status(401).json({ status: "error", message: "Invalid or missing sync key" });
+  }
+  if (syncState.running) {
+    const ranFor = Math.round((Date.now() - syncState.startedAt) / 1000);
+    return res.json({ status: "already_running", message: `A sync has been running for ${ranFor}s — not starting another.` });
+  }
   res.json({ status: "started", message: "Sync running — check logs in 2-3 minutes" });
-  syncAll();
+  syncAll("sync-now");
 });
 
 // Manual sync trigger (requires auth)
 app.post("/api/sync", requireAuth, async (req, res) => {
+  if (syncState.running) {
+    const ranFor = Math.round((Date.now() - syncState.startedAt) / 1000);
+    return res.json({ status: "already_running", message: `A sync has been running for ${ranFor}s.` });
+  }
   res.json({ status: "started", message: "Sync running in background" });
-  syncAll();
+  syncAll("manual-api");
+});
+
+// Sync health — check when the last sync ran and whether it's healthy
+app.get("/api/sync-status", async (req, res) => {
+  res.json({
+    status: "success",
+    running: syncState.running,
+    started_at: syncState.startedAt ? new Date(syncState.startedAt).toISOString() : null,
+    last_finished_at: syncState.lastFinishedAt ? new Date(syncState.lastFinishedAt).toISOString() : null,
+    last_result: syncState.lastResult,
+    last_error: syncState.lastError,
+    internal_cron: process.env.DISABLE_INTERNAL_CRON === "true" ? "disabled" : "enabled",
+  });
 });
 
 // ── GET /api/470s ─────────────────────────────────────────────────────────────
@@ -2150,7 +2221,11 @@ async function checkRenewalAlerts() {
   } catch (e) { console.error("checkRenewalAlerts error:", e.message); }
 }
 
-cron.schedule("0 13 * * *", checkRenewalAlerts); // 13:00 UTC ≈ 7/8am CT daily
+// Same multi-instance caveat as the sync cron. When internal cron is disabled,
+// drive this from the external scheduler via POST /api/renewal-alerts/run.
+if (process.env.DISABLE_INTERNAL_CRON !== "true") {
+  cron.schedule("0 13 * * *", checkRenewalAlerts); // 13:00 UTC ≈ 7/8am CT daily
+}
 
 // Manual trigger + sent-alert log for the UI
 app.post("/api/renewal-alerts/run", requireAuth, async (req, res) => {
